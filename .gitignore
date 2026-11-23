@@ -1,0 +1,51 @@
+# Secrets & env
+.env
+.env.local
+.env.*.local
+*.pem
+*.key
+credentials.json
+secrets/
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+*.db
+*.sqlite3
+
+# Node / Next.js
+node_modules/
+dashboard/node_modules/
+dashboard/.next/
+dashboard/out/
+.next/
+dist/
+build/
+*.tsbuildinfo
+
+# IDE / OS
+.idea/
+.vscode/
+*.swp
+.DS_Store
+Thumbs.db
+.cursor/
+
+# Logs & temp
+*.log
+tmp/
+temp/
+.coverage
+htmlcov/
+
+# Docker volumes / local data
+postgres_data/
+redis_data/
+metabase_data/

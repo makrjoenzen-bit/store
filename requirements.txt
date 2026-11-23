@@ -1,0 +1,40 @@
+# Core Framework & Async
+fastapi>=0.110.0
+uvicorn[standard]>=0.28.0
+pydantic>=2.6.4
+pydantic-settings>=2.2.1
+python-multipart>=0.0.9
+python-jose[cryptography]>=3.3.0
+passlib[bcrypt]>=1.7.4
+
+# Database & Cache
+sqlalchemy[asyncio]>=2.0.28
+asyncpg>=0.29.0
+alembic>=1.13.1
+redis>=5.0.3
+arq>=0.25.0
+
+# Telegram Bot
+aiogram>=3.4.1
+
+# Web3 & Cryptography
+web3>=6.15.1
+eth-account>=0.11.0
+cryptography>=42.0.5
+tronpy>=0.4.0
+
+# HTTP & API Integrations
+httpx>=0.27.0
+aiohttp>=3.9.3
+
+# Utilities
+loguru>=0.7.2
+python-dotenv>=1.0.1
+tabulate>=0.9.0
+
+# Phase 17 — AI / PDF / Ads / Radar
+Pillow>=10.0.0
+beautifulsoup4>=4.12.0
+lxml>=5.0.0
+PyMuPDF>=1.24.0
+pdfplumber>=0.11.0
