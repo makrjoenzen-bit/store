@@ -1,6 +1,9 @@
 import asyncio
 import json
+from html import escape as html_escape
+
 from aiogram import Bot, Dispatcher
+from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 from aiogram.fsm.storage.memory import MemoryStorage
@@ -71,7 +74,15 @@ async def listen_bot_events(bot: Bot):
                     if order_id:
                         kb = order_rating_keyboard(str(order_id))
                     try:
-                        await bot.send_message(chat_id=tg_id, text=text, parse_mode=ParseMode.MARKDOWN, reply_markup=kb)
+                        from src.bot.effects import EFFECT_CELEBRATION, send_with_effect
+                        await send_with_effect(
+                            bot,
+                            chat_id=tg_id,
+                            text=text,
+                            effect_id=EFFECT_CELEBRATION,
+                            reply_markup=kb,
+                            parse_mode=ParseMode.HTML,
+                        )
 
                         # Bulk packaging: if quantity >= 5, package into .txt file and send via send_document
                         if quantity and quantity >= 5 and payload:
@@ -89,9 +100,17 @@ async def listen_bot_events(bot: Bot):
                 elif channel == "bot:send_message":
                     tg_id = data.get("telegram_id")
                     msg_text = data.get("text")
+                    effect_id = data.get("effect_id")
                     if tg_id and msg_text:
                         try:
-                            await bot.send_message(chat_id=tg_id, text=msg_text, parse_mode=ParseMode.MARKDOWN)
+                            from src.bot.effects import send_with_effect
+                            await send_with_effect(
+                                bot,
+                                chat_id=tg_id,
+                                text=msg_text,
+                                effect_id=effect_id,
+                                parse_mode=ParseMode.HTML,
+                            )
                         except Exception as e:
                             logger.error(f"Failed to send bot message to {tg_id}: {e}")
 
@@ -114,7 +133,7 @@ async def listen_bot_events(bot: Bot):
                                     f"🔔 **عاد للمخزون!**\n\n"
                                     f"{emoji} **{title}** متوفر الآن — اطلبه قبل نفاده."
                                 ),
-                                parse_mode=ParseMode.MARKDOWN,
+                                parse_mode=ParseMode.HTML,
                                 reply_markup=kb,
                             )
                         except Exception as e:
@@ -134,7 +153,7 @@ async def listen_bot_events(bot: Bot):
                         try:
                             await bot.send_message(
                                 chat_id=tg_id, text=text,
-                                parse_mode=ParseMode.MARKDOWN, reply_markup=kb,
+                                parse_mode=ParseMode.HTML, reply_markup=kb,
                             )
                         except Exception as e:
                             logger.error(f"Failed renewal reminder to {tg_id}: {e}")
@@ -151,7 +170,7 @@ async def listen_bot_events(bot: Bot):
                         f"نتمنى أن يكون هذا الرد قد ساعدك! لأي استفسار إضافي نحن في خدمتك دائماً."
                     )
                     try:
-                        await bot.send_message(chat_id=tg_id, text=text, parse_mode=ParseMode.MARKDOWN)
+                        await bot.send_message(chat_id=tg_id, text=text, parse_mode=ParseMode.HTML)
                     except Exception as e:
                         logger.error(f"Failed to deliver ticket reply to {tg_id}: {e}")
 
@@ -168,7 +187,7 @@ async def listen_bot_events(bot: Bot):
                         f"يمكنك استخدامه في أي طلب آخر أو التواصل مع الدعم للمساعدة."
                     )
                     try:
-                        await bot.send_message(chat_id=tg_id, text=text, parse_mode=ParseMode.MARKDOWN)
+                        await bot.send_message(chat_id=tg_id, text=text, parse_mode=ParseMode.HTML)
                     except Exception as e:
                         logger.error(f"Failed to send refund notice to {tg_id}: {e}")
 
@@ -185,7 +204,7 @@ async def listen_bot_events(bot: Bot):
                         f"يمكنك استخدام هذا الرصيد في أي عملية شراء قادمة فوراً 💳"
                     )
                     try:
-                        await bot.send_message(chat_id=tg_id, text=text, parse_mode=ParseMode.MARKDOWN)
+                        await bot.send_message(chat_id=tg_id, text=text, parse_mode=ParseMode.HTML)
                     except Exception as e:
                         logger.error(f"Failed to send cashback notice to {tg_id}: {e}")
 
@@ -203,7 +222,7 @@ async def listen_bot_events(bot: Bot):
                         f"تم إيداع المبلغ تلقائياً في رصيد محفظتك! استمر بمشاركة رابطك واكسب المزيد 🚀"
                     )
                     try:
-                        await bot.send_message(chat_id=tg_id, text=text, parse_mode=ParseMode.MARKDOWN)
+                        await bot.send_message(chat_id=tg_id, text=text, parse_mode=ParseMode.HTML)
                     except Exception as e:
                         logger.error(f"Failed to send referral commission notice to {tg_id}: {e}")
 
@@ -231,7 +250,7 @@ async def listen_bot_events(bot: Bot):
                             await bot.send_message(
                                 chat_id=tg_id,
                                 text=msg_text,
-                                parse_mode=ParseMode.MARKDOWN,
+                                parse_mode=ParseMode.HTML,
                                 reply_markup=kb,
                             )
                         except Exception as e:
@@ -240,9 +259,15 @@ async def listen_bot_events(bot: Bot):
                 elif channel == "config:updates":
                     config_type = data.get("config_type")
                     item_id = data.get("item_id")
+                    try:
+                        from src.core.redis import event_bus as _eb
+                        await _eb.invalidate_pricing_caches()
+                        await _eb.invalidate_bot_config_caches()
+                    except Exception as e:
+                        logger.debug(f"Config cache invalidate on event failed: {e}")
                     logger.info(
                         f"Config change received: type={config_type} item_id={item_id}. "
-                        f"Caches invalidated; live DB reads on next price calc."
+                        f"Caches invalidated; live DB reads on next request."
                     )
     except asyncio.CancelledError:
         await pubsub.unsubscribe()
@@ -255,7 +280,10 @@ async def main():
         logger.warning("TELEGRAM_BOT_TOKEN is not set. Bot process cannot start.")
         return
 
-    bot = Bot(token=settings.TELEGRAM_BOT_TOKEN)
+    bot = Bot(
+        token=settings.TELEGRAM_BOT_TOKEN,
+        default=DefaultBotProperties(parse_mode=ParseMode.HTML),
+    )
     dp = Dispatcher(storage=MemoryStorage())
 
     # Register anti-spam and uncompleted order quota middleware

@@ -66,10 +66,15 @@ def compute_vip_tier(total_spent: Decimal) -> VipTier:
     return VipTier.STANDARD
 
 
-def verify_telegram_init_data(init_data: str, bot_token: str) -> Optional[dict]:
+def verify_telegram_init_data(
+    init_data: str,
+    bot_token: str,
+    *,
+    max_age_seconds: int = 86400,
+) -> Optional[dict]:
     """
     Strict HMAC-SHA256 signature verification for Telegram WebApp initData.
-    Returns parsed user dict if valid, or None.
+    Rejects missing/invalid hash and stale auth_date.
     """
     if not init_data:
         return None
@@ -81,11 +86,20 @@ def verify_telegram_init_data(init_data: str, bot_token: str) -> Optional[dict]:
         if not received_hash:
             return None
 
-        # Build data check string sorted alphabetically
+        auth_date_raw = data_dict.get("auth_date")
+        if auth_date_raw:
+            try:
+                auth_ts = int(auth_date_raw)
+                age = int(datetime.now(timezone.utc).timestamp()) - auth_ts
+                if age < 0 or age > int(max_age_seconds):
+                    logger.warning("Telegram initData auth_date expired/invalid")
+                    return None
+            except ValueError:
+                return None
+
         sorted_items = sorted(data_dict.items())
         data_check_string = "\n".join(f"{k}={v}" for k, v in sorted_items)
 
-        # secret_key = HMAC_SHA256("WebAppData", bot_token)
         secret_key = hmac.new(b"WebAppData", bot_token.encode("utf-8"), hashlib.sha256).digest()
         computed_hash = hmac.new(secret_key, data_check_string.encode("utf-8"), hashlib.sha256).hexdigest()
 
@@ -174,6 +188,21 @@ async def get_current_miniapp_customer(
 # =========================================================================
 # 1. Profile & Status
 # =========================================================================
+class LanguageUpdateDTO(BaseModel):
+    language_code: str = Field(..., pattern="^(ar|en)$")
+
+
+@router.put("/language")
+async def update_miniapp_language(
+    dto: LanguageUpdateDTO,
+    customer: Customer = Depends(get_current_miniapp_customer),
+    session: AsyncSession = Depends(get_db),
+):
+    customer.language_code = dto.language_code
+    await session.commit()
+    return {"status": "ok", "language_code": customer.language_code}
+
+
 @router.get("/profile")
 async def get_miniapp_profile(
     customer: Customer = Depends(get_current_miniapp_customer),

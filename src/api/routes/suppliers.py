@@ -233,6 +233,22 @@ async def update_supplier(
     )
 
 
+@router.delete("/{supplier_id}")
+async def delete_supplier(
+    supplier_id: str,
+    session: AsyncSession = Depends(get_db),
+    admin: AdminUser = Depends(get_current_admin),
+):
+    stmt = select(Supplier).where(Supplier.id == _uid(supplier_id))
+    supplier = (await session.execute(stmt)).scalar_one_or_none()
+    if not supplier:
+        raise HTTPException(status_code=404, detail="Supplier not found")
+    await session.delete(supplier)
+    await session.commit()
+    await event_bus.publish_config_change("suppliers", supplier_id)
+    return {"status": "ok", "deleted": supplier_id}
+
+
 @router.post("/{supplier_id}/test-connection")
 async def test_supplier_connection(
     supplier_id: str,

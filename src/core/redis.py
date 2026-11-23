@@ -45,27 +45,38 @@ class RedisEventBus:
         await self.publish(f"order:{order_id}", event)
         await self.publish("orders:live", event)
 
-    async def invalidate_pricing_caches(self) -> int:
-        """Drop quote/catalog Redis keys so Bot + Mini App see new prices within ~1s."""
+    async def _scan_delete(self, pattern: str) -> int:
+        deleted = 0
         if not self.redis:
             return 0
-        deleted = 0
         try:
-            for pattern in ("cache:quote:*", "cache:catalog:*", "cache:miniapp:*"):
-                cursor = 0
-                while True:
-                    cursor, keys = await self.redis.scan(cursor=cursor, match=pattern, count=200)
-                    if keys:
-                        deleted += await self.redis.delete(*keys)
-                    if cursor == 0:
-                        break
+            cursor = 0
+            while True:
+                cursor, keys = await self.redis.scan(cursor=cursor, match=pattern, count=200)
+                if keys:
+                    deleted += await self.redis.delete(*keys)
+                if cursor == 0:
+                    break
         except Exception:
             pass
         return deleted
 
+    async def invalidate_pricing_caches(self) -> int:
+        """Drop quote/catalog Redis keys so Bot + Mini App see new prices within ~1s."""
+        deleted = 0
+        for pattern in ("cache:quote:*", "cache:catalog:*", "cache:miniapp:*"):
+            deleted += await self._scan_delete(pattern)
+        return deleted
+
+    async def invalidate_bot_config_caches(self) -> int:
+        """Drop force-sub / bot_config Redis keys so settings apply without restart."""
+        return await self._scan_delete("cache:cfg:*")
+
     async def publish_config_change(self, config_type: str, item_id: Optional[str] = None):
         """Notifies Bot and Dashboard of catalog/pricing/bot-config modifications."""
         await self.invalidate_pricing_caches()
+        # Always drop force-sub / settings cache so Admin Bot + Dashboard edits apply live
+        await self.invalidate_bot_config_caches()
         event = {
             "type": "config_updated",
             "config_type": config_type,

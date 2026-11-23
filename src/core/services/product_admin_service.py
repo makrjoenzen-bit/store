@@ -10,7 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from src.core.models.entities import (
-    MasterProduct, ProductSupplierLink, PricingRule, AuditLog,
+    MasterProduct, ProductSupplierLink, PricingRule, AuditLog, Category,
 )
 from src.core.models.enums import PricingScope, PricingRuleType
 from src.core.services.pricing_service import pricing_service
@@ -86,6 +86,125 @@ class ProductAdminService:
                 "scope": rule.scope.value if rule else None,
             } if rule else None,
         }
+
+    async def list_categories(self, session: AsyncSession) -> List[Dict[str, Any]]:
+        rows = (await session.execute(
+            select(Category).order_by(Category.sort_order.asc(), Category.name_ar.asc())
+        )).scalars().all()
+        return [
+            {
+                "id": str(c.id),
+                "name_ar": c.name_ar,
+                "name_en": c.name_en,
+                "icon_emoji": c.icon_emoji or "📦",
+                "is_active": c.is_active,
+            }
+            for c in rows
+        ]
+
+    async def create_category(
+        self,
+        session: AsyncSession,
+        *,
+        name_ar: str,
+        name_en: Optional[str] = None,
+        icon_emoji: str = "📦",
+        reviewer: str = "admin",
+    ) -> Dict[str, Any]:
+        cat = Category(
+            name_ar=(name_ar or "").strip(),
+            name_en=(name_en or name_ar or "").strip(),
+            icon_emoji=icon_emoji or "📦",
+            is_active=True,
+            sort_order=0,
+        )
+        session.add(cat)
+        await session.commit()
+        await session.refresh(cat)
+        await event_bus.publish_config_change("categories", str(cat.id))
+        return {"id": str(cat.id), "name_ar": cat.name_ar, "name_en": cat.name_en}
+
+    async def create_product(
+        self,
+        session: AsyncSession,
+        *,
+        title_ar: str,
+        title_en: Optional[str] = None,
+        category_id: Optional[Any] = None,
+        retail_price: Decimal,
+        wholesale_cost: Optional[Decimal] = None,
+        description_ar: Optional[str] = None,
+        warranty_days: int = 30,
+        reviewer: str = "admin",
+    ) -> Dict[str, Any]:
+        sku = f"SKU-{uuid.uuid4().hex[:8].upper()}"
+        prod = MasterProduct(
+            internal_sku=sku,
+            title_ar=(title_ar or "").strip(),
+            title_en=(title_en or title_ar or "").strip(),
+            category_id=_uid(category_id) if category_id else None,
+            description_ar=description_ar,
+            custom_description_ar=description_ar,
+            warranty_days=int(warranty_days or 30),
+            is_active=True,
+            cached_final_price=Decimal(str(retail_price)),
+            cached_best_price=Decimal(str(wholesale_cost or 0)),
+            cached_in_stock=True,
+        )
+        session.add(prod)
+        await session.flush()
+        # Floor pricing rule = retail price
+        session.add(PricingRule(
+            scope=PricingScope.PRODUCT,
+            scope_id=prod.id,
+            rule_type=PricingRuleType.FLOOR,
+            value=Decimal(str(retail_price)),
+            gas_buffer_enabled=False,
+            is_active=True,
+            priority=100,
+        ))
+        session.add(AuditLog(
+            action="product_create",
+            entity_type="master_product",
+            entity_id=prod.id,
+            new_values=merge_audit_new_values(reviewer, {
+                "title_ar": prod.title_ar,
+                "retail_price": float(retail_price),
+                "sku": sku,
+            }),
+        ))
+        await session.commit()
+        await event_bus.publish_config_change("products", str(prod.id))
+        return await self.get_product(session, prod.id)
+
+    async def delete_product(
+        self,
+        session: AsyncSession,
+        product_id: Any,
+        *,
+        reviewer: str = "admin",
+    ) -> Dict[str, Any]:
+        """Soft-delete: deactivate so order history FKs stay intact."""
+        prod = (await session.execute(
+            select(MasterProduct).where(MasterProduct.id == _uid(product_id))
+        )).scalar_one_or_none()
+        if not prod:
+            raise ValueError("Product not found")
+        prod.is_active = False
+        prod.is_published_to_channel = False
+        session.add(AuditLog(
+            action="product_delete",
+            entity_type="master_product",
+            entity_id=prod.id,
+            new_values=merge_audit_new_values(reviewer, {
+                "title_ar": prod.title_ar,
+                "deleted": True,
+                "soft": True,
+            }),
+        ))
+        await session.commit()
+        await event_bus.publish_config_change("products", str(prod.id))
+        return {"status": "ok", "deleted": str(prod.id), "soft": True}
 
     async def update_product(
         self,

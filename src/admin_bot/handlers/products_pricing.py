@@ -23,8 +23,27 @@ class ProductEditFSM(StatesGroup):
     photo = State()
 
 
+class ProductCreateFSM(StatesGroup):
+    category = State()
+    name_ar = State()
+    name_en = State()
+    price = State()
+    cost = State()
+    description = State()
+
+
+class CategoryCreateFSM(StatesGroup):
+    name_ar = State()
+    name_en = State()
+
+
 def _list_kb(rows, page: int):
-    buttons = []
+    buttons = [
+        [
+            InlineKeyboardButton(text="➕ منتج", callback_data="adm:prod:new"),
+            InlineKeyboardButton(text="📁 فئة", callback_data="adm:cat:new"),
+        ],
+    ]
     for p in rows:
         price = f"${p['final_price']:.2f}" if p.get("final_price") is not None else "—"
         active = "🟢" if p["is_active"] else "⚪️"
@@ -52,6 +71,7 @@ def _detail_kb(pid: str, active: bool):
             text="⚪️ إخفاء" if active else "🟢 تفعيل",
             callback_data=f"adm:prod:toggle:{pid}",
         )],
+        [InlineKeyboardButton(text="🗑 حذف المنتج", callback_data=f"adm:prod:del:{pid}")],
         [InlineKeyboardButton(text="🔙 المنتجات", callback_data="adm:products")],
     ])
 
@@ -196,6 +216,146 @@ async def save_pricing(message: Message, state: FSMContext):
         f"(يسري فوراً على البوت والـ Mini App والقناة والداشبورد)",
         parse_mode="Markdown",
     )
+
+
+@router.callback_query(F.data.startswith("adm:prod:del:"))
+async def delete_product(callback: CallbackQuery):
+    pid = callback.data.split(":")[-1]
+    async with AsyncSessionLocal() as session:
+        await product_admin_service.delete_product(
+            session, pid, reviewer=f"tg:{callback.from_user.id}",
+        )
+    await callback.answer("تم الحذف")
+    callback.data = "adm:products"
+    await list_products(callback)
+
+
+@router.callback_query(F.data == "adm:cat:new")
+async def cat_new(callback: CallbackQuery, state: FSMContext):
+    await state.set_state(CategoryCreateFSM.name_ar)
+    await callback.message.edit_text("📁 أرسل اسم الفئة بالعربية:")
+    await callback.answer()
+
+
+@router.message(CategoryCreateFSM.name_ar)
+async def cat_name_ar(message: Message, state: FSMContext):
+    await state.update_data(name_ar=(message.text or "").strip())
+    await state.set_state(CategoryCreateFSM.name_en)
+    await message.answer("أرسل اسم الفئة بالإنجليزية (أو أعد نفس الاسم):")
+
+
+@router.message(CategoryCreateFSM.name_en)
+async def cat_save(message: Message, state: FSMContext):
+    data = await state.get_data()
+    async with AsyncSessionLocal() as session:
+        cat = await product_admin_service.create_category(
+            session,
+            name_ar=data.get("name_ar") or message.text,
+            name_en=(message.text or "").strip(),
+            reviewer=f"tg:{message.from_user.id}",
+        )
+    await state.clear()
+    await message.answer(f"✅ فئة جديدة: <b>{cat['name_ar']}</b>", parse_mode="HTML")
+
+
+@router.callback_query(F.data == "adm:prod:new")
+async def prod_new(callback: CallbackQuery, state: FSMContext):
+    async with AsyncSessionLocal() as session:
+        cats = await product_admin_service.list_categories(session)
+    if not cats:
+        await callback.answer("أنشئ فئة أولاً", show_alert=True)
+        await state.set_state(CategoryCreateFSM.name_ar)
+        await callback.message.edit_text("لا توجد فئات. أرسل اسم الفئة بالعربية:")
+        return
+    await state.set_state(ProductCreateFSM.category)
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(
+            text=f"{c.get('icon_emoji') or '📦'} {c['name_ar']}",
+            callback_data=f"adm:prod:cat:{c['id']}",
+        )]
+        for c in cats[:20]
+    ] + [[InlineKeyboardButton(text="❌ إلغاء", callback_data="adm:products")]])
+    await callback.message.edit_text("اختر الفئة للمنتج الجديد:", reply_markup=kb)
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("adm:prod:cat:"), ProductCreateFSM.category)
+async def prod_pick_cat(callback: CallbackQuery, state: FSMContext):
+    await state.update_data(category_id=callback.data.split(":")[-1])
+    await state.set_state(ProductCreateFSM.name_ar)
+    await callback.message.edit_text("📝 أرسل اسم المنتج بالعربية:")
+    await callback.answer()
+
+
+@router.message(ProductCreateFSM.name_ar)
+async def prod_name_ar(message: Message, state: FSMContext):
+    await state.update_data(name_ar=(message.text or "").strip())
+    await state.set_state(ProductCreateFSM.name_en)
+    await message.answer("أرسل الاسم بالإنجليزية (أو نفس الاسم):")
+
+
+@router.message(ProductCreateFSM.name_en)
+async def prod_name_en(message: Message, state: FSMContext):
+    await state.update_data(name_en=(message.text or "").strip())
+    await state.set_state(ProductCreateFSM.price)
+    await message.answer("💰 أرسل سعر البيع بالدولار (مثال: 9.99):")
+
+
+@router.message(ProductCreateFSM.price)
+async def prod_price(message: Message, state: FSMContext):
+    try:
+        price = Decimal((message.text or "").strip())
+        if price <= 0:
+            raise ValueError()
+    except Exception:
+        await message.answer("أدخل سعراً صالحاً مثل 9.99")
+        return
+    await state.update_data(price=str(price))
+    await state.set_state(ProductCreateFSM.cost)
+    await message.answer("📉 أرسل التكلفة (wholesale) بالدولار — أو 0 إن لم تُعرف:")
+
+
+@router.message(ProductCreateFSM.cost)
+async def prod_cost(message: Message, state: FSMContext):
+    try:
+        cost = Decimal((message.text or "0").strip() or "0")
+    except Exception:
+        await message.answer("أدخل رقماً صالحاً.")
+        return
+    await state.update_data(cost=str(cost))
+    await state.set_state(ProductCreateFSM.description)
+    await message.answer("📝 أرسل وصف المنتج (أو - للتخطي):")
+
+
+@router.message(ProductCreateFSM.description)
+async def prod_save(message: Message, state: FSMContext):
+    data = await state.get_data()
+    desc = (message.text or "").strip()
+    if desc == "-":
+        desc = None
+    try:
+        async with AsyncSessionLocal() as session:
+            p = await product_admin_service.create_product(
+                session,
+                title_ar=data["name_ar"],
+                title_en=data.get("name_en"),
+                category_id=data.get("category_id"),
+                retail_price=Decimal(data["price"]),
+                wholesale_cost=Decimal(data.get("cost") or "0"),
+                description_ar=desc,
+                reviewer=f"tg:{message.from_user.id}",
+            )
+        await state.clear()
+        await message.answer(
+            f"✅ تم إنشاء المنتج\n"
+            f"<b>{p.get('title_ar')}</b>\n"
+            f"السعر: <code>${float(p.get('final_price') or data['price']):.2f}</code>\n"
+            f"يظهر فوراً في البوت والـ Mini App.",
+            parse_mode="HTML",
+        )
+    except Exception as e:
+        await state.clear()
+        await message.answer(f"فشل الإنشاء: {e}")
 
 
 @router.message(ProductEditFSM.photo, F.photo)

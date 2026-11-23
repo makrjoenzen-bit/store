@@ -4,6 +4,8 @@ from __future__ import annotations
 import asyncio
 
 from aiogram import Bot, Dispatcher
+from aiogram.client.default import DefaultBotProperties
+from aiogram.enums import ParseMode
 from aiogram.fsm.storage.memory import MemoryStorage
 from loguru import logger
 
@@ -13,6 +15,7 @@ from src.admin_bot.handlers import (
     hub, treasury, orders, binance_pay,
     suppliers, products_pricing, crm_support, marketing,
 )
+from src.admin_bot.handlers import settings_hub
 from src.admin_bot.handlers.live_feed import listen_admin_live_feed
 
 
@@ -26,7 +29,10 @@ async def main():
             "ADMIN_TELEGRAM_IDS / ADMIN_TELEGRAM_ID empty — Admin Bot will deny everyone."
         )
 
-    bot = Bot(token=settings.ADMIN_BOT_TOKEN)
+    bot = Bot(
+        token=settings.ADMIN_BOT_TOKEN,
+        default=DefaultBotProperties(parse_mode=ParseMode.HTML),
+    )
     dp = Dispatcher(storage=MemoryStorage())
 
     # Strict ACL on every update
@@ -41,6 +47,7 @@ async def main():
     dp.include_router(products_pricing.router)
     dp.include_router(crm_support.router)
     dp.include_router(marketing.router)
+    dp.include_router(settings_hub.router)
 
     feed_task = asyncio.create_task(listen_admin_live_feed(bot))
     logger.info(

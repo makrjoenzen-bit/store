@@ -49,14 +49,17 @@ def force_sub_keyboard(
     proof_url: Optional[str],
     need_main: bool,
     need_proof: bool,
+    language: str = "ar",
 ) -> InlineKeyboardMarkup:
+    from src.bot.i18n import t, normalize_lang
+    lang = normalize_lang(language)
     buttons = []
     if need_main and main_url:
-        buttons.append([InlineKeyboardButton(text="📢 اشترك في القناة الرسمية", url=main_url)])
+        buttons.append([InlineKeyboardButton(text=t(lang, "force_sub_join"), url=main_url)])
     if need_proof and proof_url:
-        buttons.append([InlineKeyboardButton(text="⚡ اشترك في قناة إثباتات الشراء", url=proof_url)])
+        buttons.append([InlineKeyboardButton(text=t(lang, "force_sub_join"), url=proof_url)])
     buttons.append([
-        InlineKeyboardButton(text="✅ تم الاشتراك — تحقق وادخل المتجر", callback_data="verify_sub")
+        InlineKeyboardButton(text=t(lang, "force_sub_verify"), callback_data="verify_sub")
     ])
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 
@@ -166,32 +169,27 @@ class ForceSubscribeMiddleware(BaseMiddleware):
                 elif param.startswith("ref_"):
                     await redis.set(f"pending_ref:{user_id}", param, ex=3600)
 
-        missing = []
-        if need_main and not main_ok:
-            missing.append("القناة الرسمية")
-        if need_proof and not proof_ok:
-            missing.append("قناة الإثباتات / الثقة")
-
+        from html import escape as html_escape
+        from src.bot.i18n import t
         gate_text = (
-            f"👋 **أهلاً بك عزيزي {user.first_name}!**\n\n"
-            f"🔒 **تنبيه الاشتراك الإجباري:**\n"
-            f"للوصول إلى المتجر والشراء الفوري، يرجى الانضمام إلى:\n"
-            f"• " + "\n• ".join(missing) + "\n\n"
-            f"بعد الانضمام، اضغط **(✅ تم الاشتراك)** للبدء فوراً."
+            f"{t('ar', 'force_sub_title')}\n\n"
+            f"👋 {html_escape(user.first_name or '')}\n"
+            f"{t('ar', 'force_sub_verify')}"
         )
         kb = force_sub_keyboard(
             main_url=main_channel_url,
             proof_url=proof_channel_url,
             need_main=need_main and not main_ok,
             need_proof=need_proof and not proof_ok,
+            language="ar",
         )
 
         if isinstance(event, Message):
-            await event.answer(gate_text, parse_mode="Markdown", reply_markup=kb)
+            await event.answer(gate_text, parse_mode="HTML", reply_markup=kb)
         elif isinstance(event, CallbackQuery):
-            await event.answer("⚠️ يرجى الانضمام للقنوات المطلوبة أولاً!", show_alert=True)
+            await event.answer(t("ar", "force_sub_fail"), show_alert=True)
             try:
-                await event.message.edit_text(gate_text, parse_mode="Markdown", reply_markup=kb)
+                await event.message.edit_text(gate_text, parse_mode="HTML", reply_markup=kb)
             except Exception:
-                await event.message.answer(gate_text, parse_mode="Markdown", reply_markup=kb)
+                await event.message.answer(gate_text, parse_mode="HTML", reply_markup=kb)
         return

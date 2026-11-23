@@ -122,15 +122,21 @@ class MarketingAdminService:
         reviewer: str = "admin",
         admin_user_id: Optional[Any] = None,
         launch: bool = True,
+        photo_file_id: Optional[str] = None,
     ) -> Dict[str, Any]:
         if target_audience not in ("all", "buyers_only", "balance_holders"):
             raise ValueError("Invalid target_audience")
-        if not message_text or len(message_text.strip()) < 3:
+        # Photo-only broadcasts allowed with short/empty caption
+        text = (message_text or "").strip()
+        if not photo_file_id and len(text) < 3:
             raise ValueError("Broadcast message too short")
+        if not text and photo_file_id:
+            text = "📢"
 
         campaign = BroadcastCampaign(
             title=title.strip() or "Admin Broadcast",
-            message_text=message_text.strip(),
+            message_text=text,
+            image_url=f"tgfile:{photo_file_id}" if photo_file_id else None,
             target_audience=target_audience,
             status="running" if launch else "pending",
             started_at=_utc_now() if launch else None,

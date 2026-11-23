@@ -45,10 +45,10 @@ app = FastAPI(
     openapi_url="/api/openapi.json",
 )
 
-# CORS configuration
+# CORS — credentials required for HttpOnly auth cookie
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # Restrict to dashboard domain in production
+    allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],

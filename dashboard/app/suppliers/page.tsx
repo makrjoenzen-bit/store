@@ -17,28 +17,29 @@ export default function SuppliersPage() {
   const [showAddModal, setShowAddModal] = useState(false);
   const [discovering, setDiscovering] = useState(false);
   const [discoverBanner, setDiscoverBanner] = useState<any>(null);
+  // Empty templates only — no hardcoded live provider endpoints
   const DRIVER_PRESETS: Record<string, { label: string; base_url: string; hint?: string }> = {
-    tiger_v1: { label: "Tiger Store", base_url: "https://bot-production-36e9d811.up.railway.app/api/v1" },
-    ventebot_v1: { label: "VenteBot", base_url: "https://web-production-1c7b1.up.railway.app/api/reseller" },
-    larastock_v1: { label: "Lara Stock", base_url: "", hint: "الصق conn_... أو URL+Key" },
-    teslatools_v1: { label: "Tesla Tools", base_url: "https://bunnytoolsbot.tech/api/v1" },
-    hangout_v1: { label: "Hangout", base_url: "https://hangoutapi.tg-tools.shop/api/v1" },
-    generic_rest: { label: "Generic REST", base_url: "https://api.example.com/v1" },
+    generic_rest: { label: "REST عام", base_url: "", hint: "أدخل Base URL ومفتاح API" },
+    ventebot_v1: { label: "قالب موزّع", base_url: "", hint: "أدخل عنوان واجهة المورد" },
+    tiger_v1: { label: "قالب متجر", base_url: "" },
+    larastock_v1: { label: "قالب مخزون", base_url: "", hint: "الصق conn_... أو URL+Key" },
+    teslatools_v1: { label: "قالب أدوات", base_url: "" },
+    hangout_v1: { label: "قالب Hangout", base_url: "" },
   };
 
   const [newSupplier, setNewSupplier] = useState({
     name: "",
-    driver_type: "ventebot_v1",
+    driver_type: "generic_rest",
     payment_network: "usdt_bep20",
     priority_weight: 100,
     rate_limit_rpm: 60,
-    min_deposit: 0.0713,
+    min_deposit: 0,
     deposit_window_seconds: 300,
     deposit_address: "",
     binance_id: "",
     notes: "",
     config: {
-      base_url: "https://web-production-1c7b1.up.railway.app/api/reseller",
+      base_url: "",
       api_key: "",
       timeout_seconds: 15,
     },

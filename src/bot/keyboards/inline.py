@@ -88,49 +88,36 @@ def main_menu_keyboard(
     proof_channel_url: Optional[str] = None,
     language: str = "ar"
 ) -> InlineKeyboardMarkup:
-    """Rich Enterprise Welcome Hub Keyboard."""
-    en = language == "en"
-    labels = {
-        "miniapp": "🚀 Open Mini App 🛍️" if en else "🚀 فتح المتجر التفاعلي (Mini App) 🛍️",
-        "catalog": "🛍️ Browse & Buy Now" if en else "🛍️ تصفح المتجر والشراء الفوري",
-        "search": "🔍 Quick Search" if en else "🔍 بحث سريع عن منتج أو مفتاح",
-        "wallet": "👛 My Wallet & Top-Up" if en else "👛 محفظتي وشحن الرصيد",
-        "orders": "📋 My Orders" if en else "📋 سجل مشترياتي",
-        "profile": "👤 My Account & Referrals" if en else "👤 حسابي والأصدقاء (الإحالات)",
-        "support": "🛟 Support & Disputes" if en else "🛟 الدعم الفني والنزاعات",
-        "giveaway": "🎁 Free Account Giveaway" if en else "🎁 اربح حساب مجاني",
-        "faq": "📜 Terms & Warranty (FAQ)" if en else "📜 الشروط والضمان (FAQ)",
-        "lang": "🌐 Language: EN" if en else "🌐 اللغة: العربية",
-    }
+    """Minimal 4-row main menu — Store+QuickBuy, Orders, Wallet, Support&Language."""
+    from src.bot.i18n import t, normalize_lang
+    lang = normalize_lang(language)
     buttons = [
-        [InlineKeyboardButton(text=labels["miniapp"], web_app=WebAppInfo(url=settings.MINIAPP_URL))],
-        [InlineKeyboardButton(text=labels["catalog"], callback_data="nav:categories")],
-        [InlineKeyboardButton(text=labels["giveaway"], callback_data="user:giveaway")],
-        [InlineKeyboardButton(text=labels["search"], callback_data="nav:search")],
         [
-            InlineKeyboardButton(text=labels["wallet"], callback_data="user:wallet"),
-            InlineKeyboardButton(text=labels["orders"], callback_data="user:orders"),
+            InlineKeyboardButton(text=t(lang, "menu_store"), web_app=WebAppInfo(url=settings.MINIAPP_URL)),
+            InlineKeyboardButton(text=t(lang, "menu_quick"), callback_data="nav:categories"),
         ],
-        [
-            InlineKeyboardButton(text=labels["profile"], callback_data="user:profile"),
-            InlineKeyboardButton(text=labels["support"], callback_data="user:support"),
-        ],
-        [
-            InlineKeyboardButton(text=labels["faq"], callback_data="nav:faq"),
-            InlineKeyboardButton(text=labels["lang"], callback_data="nav:toggle_lang"),
-        ],
+        [InlineKeyboardButton(text=t(lang, "menu_orders"), callback_data="user:orders")],
+        [InlineKeyboardButton(text=t(lang, "menu_wallet"), callback_data="user:wallet")],
+        [InlineKeyboardButton(text=t(lang, "menu_support_lang"), callback_data="nav:support_lang")],
     ]
-
-    # Row 6: Channel URLs (Dual-Channel Architecture)
-    ch_row = []
-    if main_channel_url:
-        ch_row.append(InlineKeyboardButton(text="📢 القناة الرسمية", url=main_channel_url))
-    if proof_channel_url:
-        ch_row.append(InlineKeyboardButton(text="⚡ قناة الإثباتات الحية", url=proof_channel_url))
-    if ch_row:
-        buttons.append(ch_row)
-
     return InlineKeyboardMarkup(inline_keyboard=buttons)
+
+
+def support_lang_keyboard(
+    *,
+    language: str = "ar",
+    main_channel_url: Optional[str] = None,
+) -> InlineKeyboardMarkup:
+    from src.bot.i18n import t, normalize_lang
+    lang = normalize_lang(language)
+    rows = [
+        [InlineKeyboardButton(text=t(lang, "menu_support"), callback_data="user:support")],
+        [InlineKeyboardButton(text=t(lang, "menu_lang"), callback_data="nav:toggle_lang")],
+    ]
+    if main_channel_url:
+        rows.append([InlineKeyboardButton(text=t(lang, "menu_channel"), url=main_channel_url)])
+    rows.append([InlineKeyboardButton(text=t(lang, "home"), callback_data="nav:home")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
 def categories_keyboard(categories: List[dict]) -> InlineKeyboardMarkup:
@@ -212,24 +199,53 @@ def products_keyboard(products: List[dict], category_id: str) -> InlineKeyboardM
     return paginated_products_keyboard(products, category_id, page=1, total_pages=1)
 
 
-def quantity_selector_keyboard(product_id: str, max_qty: int = 99) -> InlineKeyboardMarkup:
-    """Fast inline quantity selector: 1, 2, 3, 5, 10, or custom."""
-    row1 = []
-    row2 = []
-    for q in [1, 2, 3]:
-        if q <= max_qty:
-            row1.append(InlineKeyboardButton(text=f"{q}", callback_data=f"buy_qty:{product_id}:{q}"))
-    for q in [5, 10]:
-        if q <= max_qty:
-            row2.append(InlineKeyboardButton(text=f"{q}", callback_data=f"buy_qty:{product_id}:{q}"))
+def quantity_selector_keyboard(
+    product_id: str,
+    max_qty: int = 99,
+    *,
+    current_qty: int = 1,
+    unit_cents: int = 0,
+) -> InlineKeyboardMarkup:
+    """
+    Quantity UI: +/- stepper with live total + quick presets (1/2/3/5/10) + custom.
+    unit_cents keeps callback_data compact (Telegram 64-byte limit).
+    """
+    max_qty = max(1, int(max_qty or 1))
+    qty = max(1, min(int(current_qty or 1), max_qty))
+    unit = max(0, int(unit_cents or 0))
+    total_cents = unit * qty
+    unit_disp = unit / 100.0
+    total_disp = total_cents / 100.0
 
-    buttons = []
-    if row1:
-        buttons.append(row1)
-    if row2:
-        buttons.append(row2)
+    minus_q = max(1, qty - 1)
+    plus_q = min(max_qty, qty + 1)
+
+    buttons: list = [
+        [
+            InlineKeyboardButton(text="➖", callback_data=f"qty_adj:{product_id}:{minus_q}:{unit}:{max_qty}"),
+            InlineKeyboardButton(text=f"× {qty}", callback_data="noop"),
+            InlineKeyboardButton(text="➕", callback_data=f"qty_adj:{product_id}:{plus_q}:{unit}:{max_qty}"),
+        ],
+        [InlineKeyboardButton(
+            text=f"✅ شراء الآن · ${total_disp:.2f}",
+            callback_data=f"buy_qty:{product_id}:{qty}",
+        )],
+    ]
+    presets = []
+    for q in (1, 2, 3, 5, 10):
+        if q <= max_qty:
+            presets.append(InlineKeyboardButton(
+                text=str(q),
+                callback_data=f"qty_adj:{product_id}:{q}:{unit}:{max_qty}",
+            ))
+    if presets:
+        buttons.append(presets)
     buttons.append([InlineKeyboardButton(text="✏️ كمية مخصصة", callback_data=f"custom_qty:{product_id}")])
-    buttons.append([InlineKeyboardButton(text="🔙 إلغاء", callback_data=f"prod:{product_id}")])
+    buttons.append([InlineKeyboardButton(
+        text=f"💵 ${unit_disp:.2f} / قطعة",
+        callback_data="noop",
+    )])
+    buttons.append([InlineKeyboardButton(text="🔙 رجوع", callback_data=f"prod:{product_id}")])
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 
 
@@ -238,7 +254,11 @@ def payment_methods_keyboard(
     total_price: float = 0.0,
     has_wallet_balance: bool = False,
     wallet_balance: float = 0.0,
-    has_coupon_applied: bool = False
+    has_coupon_applied: bool = False,
+    *,
+    enable_usdt: bool = True,
+    enable_binance: bool = True,
+    enable_sham_cash: bool = True,
 ) -> InlineKeyboardMarkup:
     buttons = []
 
@@ -266,51 +286,50 @@ def payment_methods_keyboard(
             )
         ])
 
-    buttons.extend([
-        [InlineKeyboardButton(text="💎 USDT (BEP-20 / شبكة BSC)", callback_data=f"pay:usdt_bep20:{order_id}")],
-        [InlineKeyboardButton(text="⚡ USDT (TRC-20 / شبكة TRON)", callback_data=f"pay:usdt_trc20:{order_id}")],
-        [InlineKeyboardButton(text="🟡 Binance Pay", callback_data=f"pay:binance_pay:{order_id}")],
-        [InlineKeyboardButton(text="🏦 تحويل محلي (شام كاش - Sham Cash)", callback_data=f"pay:sham_cash:{order_id}")],
-        [InlineKeyboardButton(text="❌ إلغاء الطلب", callback_data=f"cancel_order:{order_id}")],
-    ])
+    if enable_usdt:
+        buttons.append([InlineKeyboardButton(text="💎 USDT (BEP-20 / شبكة BSC)", callback_data=f"pay:usdt_bep20:{order_id}")])
+        buttons.append([InlineKeyboardButton(text="⚡ USDT (TRC-20 / شبكة TRON)", callback_data=f"pay:usdt_trc20:{order_id}")])
+    if enable_binance:
+        buttons.append([InlineKeyboardButton(text="🟡 Binance Pay", callback_data=f"pay:binance_pay:{order_id}")])
+    if enable_sham_cash:
+        buttons.append([InlineKeyboardButton(text="🏦 تحويل محلي (شام كاش - Sham Cash)", callback_data=f"pay:sham_cash:{order_id}")])
+    buttons.append([InlineKeyboardButton(text="❌ إلغاء الطلب", callback_data=f"cancel_order:{order_id}")])
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 
 
-def split_payment_methods_keyboard(order_id: str, remainder_amount: float) -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(
-        inline_keyboard=[
-            [
-                InlineKeyboardButton(
-                    text=f"💎 دفع المتبقي (${remainder_amount:.2f}) عبر USDT BEP-20",
-                    callback_data=f"pay:split_usdt:{order_id}"
-                )
-            ],
-            [
-                InlineKeyboardButton(
-                    text=f"⚡ دفع المتبقي (${remainder_amount:.2f}) عبر USDT TRC-20",
-                    callback_data=f"pay:split_trc20:{order_id}"
-                )
-            ],
-            [
-                InlineKeyboardButton(
-                    text=f"🟡 دفع المتبقي (${remainder_amount:.2f}) عبر Binance Pay",
-                    callback_data=f"pay:split_binance:{order_id}"
-                )
-            ],
-            [
-                InlineKeyboardButton(
-                    text=f"🏦 دفع المتبقي (${remainder_amount:.2f}) عبر شام كاش",
-                    callback_data=f"pay:split_sham_cash:{order_id}"
-                )
-            ],
-            [
-                InlineKeyboardButton(
-                    text="🔙 العودة لوسائل الدفع الكاملة",
-                    callback_data=f"pay_options:{order_id}"
-                )
-            ],
-        ]
-    )
+def split_payment_methods_keyboard(
+    order_id: str,
+    remainder_amount: float,
+    *,
+    enable_usdt: bool = True,
+    enable_binance: bool = True,
+    enable_sham_cash: bool = True,
+) -> InlineKeyboardMarkup:
+    rows = []
+    if enable_usdt:
+        rows.append([InlineKeyboardButton(
+            text=f"💎 دفع المتبقي (${remainder_amount:.2f}) عبر USDT BEP-20",
+            callback_data=f"pay:split_usdt:{order_id}",
+        )])
+        rows.append([InlineKeyboardButton(
+            text=f"⚡ دفع المتبقي (${remainder_amount:.2f}) عبر USDT TRC-20",
+            callback_data=f"pay:split_trc20:{order_id}",
+        )])
+    if enable_binance:
+        rows.append([InlineKeyboardButton(
+            text=f"🟡 دفع المتبقي (${remainder_amount:.2f}) عبر Binance Pay",
+            callback_data=f"pay:split_binance:{order_id}",
+        )])
+    if enable_sham_cash:
+        rows.append([InlineKeyboardButton(
+            text=f"🏦 دفع المتبقي (${remainder_amount:.2f}) عبر شام كاش",
+            callback_data=f"pay:split_sham_cash:{order_id}",
+        )])
+    rows.append([InlineKeyboardButton(
+        text="🔙 العودة لوسائل الدفع الكاملة",
+        callback_data=f"pay_options:{order_id}",
+    )])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
 def topup_presets_keyboard() -> InlineKeyboardMarkup:
@@ -335,17 +354,24 @@ def topup_presets_keyboard() -> InlineKeyboardMarkup:
     )
 
 
-def topup_methods_keyboard(amount: float) -> InlineKeyboardMarkup:
+def topup_methods_keyboard(
+    amount: float,
+    *,
+    enable_usdt: bool = True,
+    enable_binance: bool = True,
+    enable_sham_cash: bool = True,
+) -> InlineKeyboardMarkup:
     """Multi-method selector for wallet top-up."""
-    return InlineKeyboardMarkup(
-        inline_keyboard=[
-            [InlineKeyboardButton(text=f"💎 USDT (BEP-20 / شبكة BSC) — ${amount}", callback_data=f"topup_pay:bep20:{amount}")],
-            [InlineKeyboardButton(text=f"⚡ USDT (TRC-20 / شبكة TRON) — ${amount}", callback_data=f"topup_pay:trc20:{amount}")],
-            [InlineKeyboardButton(text=f"🟡 Binance Pay — ${amount}", callback_data=f"topup_pay:binance:{amount}")],
-            [InlineKeyboardButton(text=f"🏦 تحويل محلي شام كاش — ${amount}", callback_data=f"topup_pay:sham_cash:{amount}")],
-            [InlineKeyboardButton(text="🔙 العودة لاختيار المبلغ", callback_data="user:wallet")],
-        ]
-    )
+    rows = []
+    if enable_usdt:
+        rows.append([InlineKeyboardButton(text=f"💎 USDT (BEP-20 / شبكة BSC) — ${amount}", callback_data=f"topup_pay:bep20:{amount}")])
+        rows.append([InlineKeyboardButton(text=f"⚡ USDT (TRC-20 / شبكة TRON) — ${amount}", callback_data=f"topup_pay:trc20:{amount}")])
+    if enable_binance:
+        rows.append([InlineKeyboardButton(text=f"🟡 Binance Pay — ${amount}", callback_data=f"topup_pay:binance:{amount}")])
+    if enable_sham_cash:
+        rows.append([InlineKeyboardButton(text=f"🏦 تحويل محلي شام كاش — ${amount}", callback_data=f"topup_pay:sham_cash:{amount}")])
+    rows.append([InlineKeyboardButton(text="🔙 العودة لاختيار المبلغ", callback_data="user:wallet")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
 def order_rating_keyboard(order_id: str) -> InlineKeyboardMarkup:

@@ -48,7 +48,7 @@ def admin_main_menu_inline(*, staff_only: bool = False) -> InlineKeyboardMarkup:
             [InlineKeyboardButton(text="🛡️ طلبات الضمان", callback_data="adm:warranty")],
             [InlineKeyboardButton(text="👥 العملاء والدعم", callback_data="adm:crm")],
             [InlineKeyboardButton(text="📢 التسويق والبث", callback_data="adm:marketing")],
-            [InlineKeyboardButton(text="⚙️ سعر شام كاش", callback_data="adm:settings:syp")],
+            [InlineKeyboardButton(text="⚙️ إعدادات البوت / شام كاش", callback_data="adm:cfg")],
         ]
     )
 

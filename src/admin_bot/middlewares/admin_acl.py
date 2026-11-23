@@ -48,7 +48,9 @@ OWNER_ONLY_CB_PREFIXES = (
     "adm:prod:",
     "adm:marketing",
     "adm:settings",
+    "adm:cfg",
     "adm:cfg:",
+    "adm:cat:",
 )
 
 

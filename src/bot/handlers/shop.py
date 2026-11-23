@@ -117,43 +117,62 @@ async def get_dynamic_config(session, key: str, default_val: str) -> str:
     stmt = select(BotConfig).where(BotConfig.key == key)
     res = await session.execute(stmt)
     cfg = res.scalar_one_or_none()
-    if cfg and cfg.value:
+    if cfg and cfg.value is not None and cfg.value != "":
         if isinstance(cfg.value, str):
             return cfg.value
+        if isinstance(cfg.value, bool):
+            return "true" if cfg.value else "false"
         return str(cfg.value)
     return default_val
 
 
+def _cfg_truthy(val) -> bool:
+    if isinstance(val, bool):
+        return val
+    return str(val or "").lower() in ("true", "1", "yes", "on")
+
+
+async def payment_rail_flags(session) -> dict:
+    return {
+        "enable_usdt": _cfg_truthy(await get_dynamic_config(session, "pay_usdt_enabled", "true")),
+        "enable_binance": _cfg_truthy(await get_dynamic_config(session, "pay_binance_enabled", "true")),
+        "enable_sham_cash": _cfg_truthy(await get_dynamic_config(session, "pay_sham_cash_enabled", "true")),
+    }
+
+
 # ---------------- Rich User Welcome Hub ----------------
 async def render_welcome_hub(customer: Customer, session) -> Tuple[str, InlineKeyboardMarkup]:
-    welcome_text = await get_dynamic_config(
-        session,
-        "welcome_message_ar",
-        "أهلاً بك في متجر الاشتراكات الرقمية والخدمات الفورية! 🌟\nنوفر لك أفضل الأسعار مع تسليم فوري وآلي."
-    )
+    from html import escape as html_escape
+    from src.bot.i18n import t, normalize_lang
+
+    lang = normalize_lang(customer.language_code)
+    welcome_key = "welcome_message_en" if lang == "en" else "welcome_message_ar"
+    welcome_default = t(lang, "welcome_fallback")
+    welcome_text = await get_dynamic_config(session, welcome_key, welcome_default)
+    if isinstance(welcome_text, str) is False:
+        welcome_text = welcome_default
     main_url = await get_dynamic_config(session, "main_channel_url", settings.TELEGRAM_MAIN_CHANNEL_URL)
     proof_url = await get_dynamic_config(session, "proof_channel_url", settings.TELEGRAM_PROOF_CHANNEL_URL)
 
     from sqlalchemy import func
     total_users = int((await session.execute(select(func.count(Customer.id)))).scalar_one() or 0)
-    user_tag = f"@{customer.telegram_username}" if customer.telegram_username else (customer.first_name or "عزيزي العميل")
-    # HTML blockquote for account trust panel (parse_mode HTML on send)
+    raw_name = customer.first_name or ("Customer" if lang == "en" else "عزيزي العميل")
+    user_tag = f"@{customer.telegram_username}" if customer.telegram_username else raw_name
     text = (
-        f"👋 <b>أهلاً بك، {user_tag}!</b>\n"
+        f"👋 <b>{html_escape(str(user_tag))}</b>\n"
         f"<blockquote>"
         f"🆔 ID: <code>{customer.telegram_id}</code>\n"
-        f"👤 الاسم: {customer.first_name or '—'}\n"
-        f"💰 الرصيد: <b>${customer.wallet_balance:.2f} USD</b>\n"
-        f"📦 مشتريات مكتملة: <b>${customer.total_spent:.2f}</b> • ({customer.total_orders} طلبات)\n"
-        f"👥 مستخدمو المتجر: <b>{total_users}</b>"
+        f"💰 <b>${float(customer.wallet_balance or 0):.2f}</b>\n"
+        f"📦 {int(customer.total_orders or 0)} · ${float(customer.total_spent or 0):.2f}\n"
+        f"👥 {total_users}"
         f"</blockquote>\n"
-        f"{welcome_text}\n\n"
-        f"👇 اختر ما يناسبك من القائمة أدناه:"
+        f"{html_escape(str(welcome_text))}\n\n"
+        f"{t(lang, 'home')}"
     )
     kb = main_menu_keyboard(
         main_channel_url=main_url,
         proof_channel_url=proof_url,
-        language=customer.language_code or "ar",
+        language=lang,
     )
     return text, kb
 
@@ -163,6 +182,11 @@ async def render_welcome_hub(customer: Customer, session) -> Tuple[str, InlineKe
 async def handle_start(message: Message, state: FSMContext):
     await state.clear()
     async with AsyncSessionLocal() as session:
+        if _cfg_truthy(await get_dynamic_config(session, "maintenance_mode", "false")):
+            await message.answer(
+                "🛠️ المتجر في وضع الصيانة مؤقتاً.\nجرّب لاحقاً — شكراً لتفهمك."
+            )
+            return
         customer, is_new = await get_or_create_customer_ex(session, message.from_user)
 
         # Check for deep-link: /start prod_<id> or /start buy_<id> or /start ref_<id>
@@ -210,15 +234,40 @@ async def handle_start(message: Message, state: FSMContext):
                             logger.warning(f"Referral campaign invite record failed: {e}")
 
         text, kb = await render_welcome_hub(customer, session)
-        await message.answer(text, parse_mode="HTML", reply_markup=kb)
+        from src.bot.effects import EFFECT_FIRE, send_with_effect
+        await send_with_effect(
+            message,
+            text=text,
+            effect_id=EFFECT_FIRE if is_new else None,
+            reply_markup=kb,
+            parse_mode="HTML",
+        )
 
 
 @router.callback_query(F.data == "nav:home")
 async def nav_home(callback: CallbackQuery, state: FSMContext):
+    await callback.answer()
     await state.clear()
     async with AsyncSessionLocal() as session:
         customer = await get_or_create_customer(session, callback.from_user)
         text, kb = await render_welcome_hub(customer, session)
+        try:
+            await callback.message.edit_text(text, parse_mode="HTML", reply_markup=kb)
+        except Exception:
+            await callback.message.answer(text, parse_mode="HTML", reply_markup=kb)
+
+
+@router.callback_query(F.data == "nav:support_lang")
+async def nav_support_lang(callback: CallbackQuery):
+    await callback.answer()
+    from src.bot.keyboards.inline import support_lang_keyboard
+    from src.bot.i18n import t, normalize_lang
+    async with AsyncSessionLocal() as session:
+        customer = await get_or_create_customer(session, callback.from_user)
+        lang = normalize_lang(customer.language_code)
+        main_url = await get_dynamic_config(session, "main_channel_url", settings.TELEGRAM_MAIN_CHANNEL_URL)
+        text = f"<b>{t(lang, 'menu_support_lang')}</b>\n\n{t(lang, 'support_prompt')}"
+        kb = support_lang_keyboard(language=lang, main_channel_url=main_url)
         try:
             await callback.message.edit_text(text, parse_mode="HTML", reply_markup=kb)
         except Exception:
@@ -321,7 +370,7 @@ async def cb_user_wallet(callback: CallbackQuery):
             f"👇 اختر مبلغ الشحن السريع أدناه:"
         )
         kb = topup_presets_keyboard()
-        await callback.message.edit_text(text, parse_mode="Markdown", reply_markup=kb)
+        await callback.message.edit_text(text, parse_mode="HTML", reply_markup=kb)
 
 
 @router.callback_query(F.data == "user:orders")
@@ -349,7 +398,7 @@ async def cb_user_orders(callback: CallbackQuery):
                     [InlineKeyboardButton(text="🔙 العودة للقائمة الرئيسية", callback_data="nav:home")],
                 ]
             )
-            await callback.message.edit_text(text, parse_mode="Markdown", reply_markup=kb)
+            await callback.message.edit_text(text, parse_mode="HTML", reply_markup=kb)
             return
 
         text = f"📋 **آخر مشترياتك ({len(orders)} طلبات):**\n\n"
@@ -398,7 +447,7 @@ async def cb_user_orders(callback: CallbackQuery):
 
         buttons.append([InlineKeyboardButton(text="🔙 العودة للقائمة الرئيسية", callback_data="nav:home")])
         kb = InlineKeyboardMarkup(inline_keyboard=buttons)
-        await callback.message.edit_text(text, parse_mode="Markdown", reply_markup=kb)
+        await callback.message.edit_text(text, parse_mode="HTML", reply_markup=kb)
 
 
 @router.callback_query(F.data.startswith("warranty:"))
@@ -419,7 +468,7 @@ async def cb_warranty_start(callback: CallbackQuery, state: FSMContext):
         await state.update_data(order_id=str(order.id))
         await callback.message.answer(
             "🛡️ **طلب استبدال ضمن الضمان**\n\nاشرح المشكلة باختصار:",
-            parse_mode="Markdown",
+            parse_mode="HTML",
             reply_markup=cancel_fsm_keyboard(),
         )
         await callback.answer()
@@ -452,7 +501,7 @@ async def _warranty_finish(message: Message, state: FSMContext, screenshot_file_
             await message.answer(
                 f"✅ تم فتح طلب الضمان.\nمتبقي من الضمان: `{result['days_remaining']}` يوم.\n"
                 f"سيراجع فريقنا طلبك قريباً.",
-                parse_mode="Markdown",
+                parse_mode="HTML",
                 reply_markup=main_menu_keyboard(),
             )
         except ValueError as e:
@@ -502,7 +551,7 @@ async def cb_user_profile(callback: CallbackQuery):
                 [InlineKeyboardButton(text="🔙 العودة للقائمة الرئيسية", callback_data="nav:home")]
             ]
         )
-        await callback.message.edit_text(text, parse_mode="Markdown", reply_markup=kb)
+        await callback.message.edit_text(text, parse_mode="HTML", reply_markup=kb)
 
 
 async def show_giveaway_screen(message_or_cb, customer: Customer, session):
@@ -554,11 +603,11 @@ async def show_giveaway_screen(message_or_cb, customer: Customer, session):
 
     if isinstance(message_or_cb, CallbackQuery):
         try:
-            await message_or_cb.message.edit_text(text, parse_mode="Markdown", reply_markup=kb)
+            await message_or_cb.message.edit_text(text, parse_mode="HTML", reply_markup=kb)
         except Exception:
-            await message_or_cb.message.answer(text, parse_mode="Markdown", reply_markup=kb)
+            await message_or_cb.message.answer(text, parse_mode="HTML", reply_markup=kb)
     else:
-        await message_or_cb.answer(text, parse_mode="Markdown", reply_markup=kb)
+        await message_or_cb.answer(text, parse_mode="HTML", reply_markup=kb)
 
 
 @router.callback_query(F.data == "user:giveaway")
@@ -587,7 +636,7 @@ async def cb_user_support(callback: CallbackQuery):
             [InlineKeyboardButton(text="🔙 العودة للقائمة الرئيسية", callback_data="nav:home")],
         ]
     )
-    await callback.message.edit_text(text, parse_mode="Markdown", reply_markup=kb)
+    await callback.message.edit_text(text, parse_mode="HTML", reply_markup=kb)
 
 
 @router.callback_query(F.data == "nav:categories")
@@ -671,7 +720,7 @@ async def nav_featured(callback: CallbackQuery):
             })
         await callback.message.edit_text(
             "🔥 **الأكثر طلباً الآن**\nاختر منتجاً:",
-            parse_mode="Markdown",
+            parse_mode="HTML",
             reply_markup=paginated_products_keyboard(products_data, "featured", page=1, total_pages=1),
         )
 
@@ -757,14 +806,31 @@ async def nav_category_products(callback: CallbackQuery):
         kb_cat = page_cat_id if not str(page_cat_id).startswith("fam:") else f"fam:{cat_name}"
         await callback.message.edit_text(
             text,
-            parse_mode="Markdown",
+            parse_mode="HTML",
             reply_markup=paginated_products_keyboard(products_data, kb_cat, page=page, total_pages=total_pages)
         )
+
+
+async def _edit_or_send(target_message, text: str, reply_markup=None, parse_mode: str = "HTML"):
+    """edit_text when possible; falls back if the message is a photo/caption card."""
+    try:
+        await target_message.edit_text(text, parse_mode=parse_mode, reply_markup=reply_markup)
+        return
+    except Exception:
+        pass
+    try:
+        await target_message.edit_caption(caption=text, parse_mode=parse_mode, reply_markup=reply_markup)
+        return
+    except Exception:
+        pass
+    await target_message.answer(text, parse_mode=parse_mode, reply_markup=reply_markup)
 
 
 # ---------------- Product Details & Buy ----------------
 async def show_direct_buy_quantity(message_or_cb, product_id: str, session):
     """1-click deep-link: product card + instant quantity buttons (skips menu hunting)."""
+    from html import escape as html_escape
+
     stmt = (
         select(MasterProduct)
         .where(MasterProduct.id == _as_uuid(product_id))
@@ -774,7 +840,7 @@ async def show_direct_buy_quantity(message_or_cb, product_id: str, session):
     if not product:
         text = "عذراً، هذا المنتج غير متوفر حالياً."
         if isinstance(message_or_cb, CallbackQuery):
-            await message_or_cb.message.edit_text(text)
+            await _edit_or_send(message_or_cb.message, text)
         else:
             await message_or_cb.answer(text)
         return
@@ -783,39 +849,39 @@ async def show_direct_buy_quantity(message_or_cb, product_id: str, session):
     final_price = pricing_info.get("final_price", Decimal("0.0")) or Decimal("0.0")
     is_in_stock = pricing_info.get("is_available", False)
     winner = pricing_info.get("winner_link")
-    max_qty = winner.available_quantity if winner and winner.available_quantity else 50
+    max_qty = int(winner.available_quantity) if winner and winner.available_quantity else 50
     warranty = int(getattr(product, "warranty_days", 30) or 30)
     emoji = getattr(product, "custom_emoji", "✨") or "✨"
     stock_qty = int(winner.available_quantity) if winner and winner.available_quantity is not None else ("∞" if is_in_stock else 0)
-    stock_text = f"متوفر (`{stock_qty}`)" if is_in_stock else "نفد من المخزون مؤقتاً ❌"
-    bulk_lines = pricing_service.format_bulk_tiers_caption(
-        final_price, getattr(product, "bulk_pricing_tiers", None)
-    )
-    bulk_block = f"\n{bulk_lines}\n" if bulk_lines else "\n"
+    stock_text = f"متوفر (<code>{stock_qty}</code>)" if is_in_stock else "نفد من المخزون مؤقتاً ❌"
+    title = html_escape(product.title_ar or product.title_en or "منتج")
+    unit_cents = int((Decimal(str(final_price)) * 100).quantize(Decimal("1")))
 
     card_text = (
-        f"{emoji} **{product.title_ar}**\n\n"
-        f"💰 **سعر القطعة:** `${final_price}`\n"
-        f"📦 **المخزون:** {stock_text}\n"
-        f"🛡️ **الضمان:** `{warranty}` يوم"
-        f"{bulk_block}"
+        f"{emoji} <b>{title}</b>\n\n"
+        f"💰 سعر القطعة: <code>${float(final_price):.2f}</code>\n"
+        f"📦 المخزون: {stock_text}\n"
+        f"🛡️ الضمان: <code>{warranty}</code> يوم\n\n"
         f"اختر الكمية — يتم حساب الإجمالي فوراً:"
     )
     if not is_in_stock:
         kb = product_detail_keyboard(str(product.id), False)
     else:
-        kb = quantity_selector_keyboard(str(product.id), max_qty=max_qty)
+        kb = quantity_selector_keyboard(
+            str(product.id), max_qty=max_qty, current_qty=1, unit_cents=unit_cents
+        )
 
     if isinstance(message_or_cb, CallbackQuery):
-        try:
-            await message_or_cb.message.edit_text(card_text, parse_mode="Markdown", reply_markup=kb)
-        except Exception:
-            await message_or_cb.message.answer(card_text, parse_mode="Markdown", reply_markup=kb)
+        await _edit_or_send(message_or_cb.message, card_text, reply_markup=kb)
     else:
-        await message_or_cb.answer(card_text, parse_mode="Markdown", reply_markup=kb)
+        await message_or_cb.answer(card_text, parse_mode="HTML", reply_markup=kb)
 
 
-async def show_product_detail(message_or_cb, product_id: str, session):
+async def show_product_detail(message_or_cb, product_id: str, session, *, language: str = "ar"):
+    from html import escape as html_escape
+    from src.bot.i18n import normalize_lang
+
+    lang = normalize_lang(language)
     stmt = (
         select(MasterProduct)
         .where(MasterProduct.id == _as_uuid(product_id))
@@ -824,39 +890,50 @@ async def show_product_detail(message_or_cb, product_id: str, session):
     res = await session.execute(stmt)
     product = res.scalar_one_or_none()
     if not product:
-        text = "عذراً، هذا المنتج غير متوفر حالياً."
+        text = "Product unavailable." if lang == "en" else "عذراً، هذا المنتج غير متوفر حالياً."
         if isinstance(message_or_cb, CallbackQuery):
-            await message_or_cb.message.edit_text(text)
+            await _edit_or_send(message_or_cb.message, text)
         else:
             await message_or_cb.answer(text)
         return
 
     pricing_info = await pricing_service.get_best_supplier_and_price(session, str(product_id))
-    final_price = pricing_info.get("final_price", Decimal("0.0"))
+    final_price = pricing_info.get("final_price", Decimal("0.0")) or Decimal("0.0")
     is_in_stock = pricing_info.get("is_available", False)
     winner = pricing_info.get("winner_link")
     stock_qty = int(winner.available_quantity) if winner and winner.available_quantity is not None else None
     if is_in_stock:
-        stock_text = f"متوفر (`{stock_qty if stock_qty is not None else '∞'}`) ✅"
+        stock_label = "In stock" if lang == "en" else "متوفر"
+        stock_text = f"{stock_label} (<code>{stock_qty if stock_qty is not None else '∞'}</code>) ✅"
     else:
-        stock_text = "نفد من المخزون مؤقتاً ❌"
+        stock_text = "Out of stock ❌" if lang == "en" else "نفد من المخزون مؤقتاً ❌"
 
     emoji = getattr(product, "custom_emoji", "✨") or "✨"
-    desc = getattr(product, "custom_description_ar", None) or product.description_ar or "تسليم آلي وفوري للحساب أو المفتاح."
-    button_label = getattr(product, "custom_button_label_ar", None) or "⚡ شراء الآن (دفع فوري)"
-    warranty = int(getattr(product, "warranty_days", 30) or 30)
-    bulk_lines = pricing_service.format_bulk_tiers_caption(
-        final_price, getattr(product, "bulk_pricing_tiers", None)
-    )
-    bulk_block = f"\n{bulk_lines}\n" if bulk_lines else "\n"
+    if lang == "en":
+        title = product.title_en or product.title_ar or "Product"
+        desc = (
+            getattr(product, "custom_description_en", None)
+            or product.description_en
+            or product.description_ar
+            or "Instant digital delivery."
+        )
+        button_label = "⚡ Buy now"
+        price_lbl, warranty_lbl, stock_lbl2, desc_lbl = "Price", "Warranty", "Stock", "Description"
+        days_lbl = "days"
+    else:
+        title = product.title_ar or product.title_en or "منتج"
+        desc = getattr(product, "custom_description_ar", None) or product.description_ar or "تسليم آلي وفوري للحساب أو المفتاح."
+        button_label = getattr(product, "custom_button_label_ar", None) or "⚡ شراء الآن (دفع فوري)"
+        price_lbl, warranty_lbl, stock_lbl2, desc_lbl = "السعر النهائي", "الضمان", "المخزون", "الوصف"
+        days_lbl = "يوم"
 
+    warranty = int(getattr(product, "warranty_days", 30) or 30)
     card_text = (
-        f"{emoji} **{product.title_ar}**\n\n"
-        f"📝 **الوصف:**\n{desc}\n\n"
-        f"💰 **السعر النهائي:** `${final_price}`\n"
-        f"🛡️ **الضمان:** `{warranty}` يوم\n"
-        f"📦 **المخزون:** {stock_text}"
-        f"{bulk_block}"
+        f"{emoji} <b>{html_escape(title)}</b>\n\n"
+        f"📝 <b>{desc_lbl}:</b>\n{html_escape(str(desc))}\n\n"
+        f"💰 <b>{price_lbl}:</b> <code>${float(final_price):.2f}</code>\n"
+        f"🛡️ <b>{warranty_lbl}:</b> <code>{warranty}</code> {days_lbl}\n"
+        f"📦 <b>{stock_lbl2}:</b> {stock_text}"
     )
 
     kb = product_detail_keyboard(
@@ -869,7 +946,7 @@ async def show_product_detail(message_or_cb, product_id: str, session):
     photo_url = getattr(product, "photo_url", None)
 
     async def _send_text(msg_target):
-        await msg_target.answer(card_text, parse_mode="Markdown", reply_markup=kb)
+        await msg_target.answer(card_text, parse_mode="HTML", reply_markup=kb)
 
     if isinstance(message_or_cb, CallbackQuery):
         cb = message_or_cb
@@ -882,23 +959,20 @@ async def show_product_detail(message_or_cb, product_id: str, session):
                 await cb.message.answer_photo(
                     photo=photo_id or photo_url,
                     caption=card_text,
-                    parse_mode="Markdown",
+                    parse_mode="HTML",
                     reply_markup=kb,
                 )
             except Exception:
                 await _send_text(cb.message)
         else:
-            try:
-                await cb.message.edit_text(card_text, parse_mode="Markdown", reply_markup=kb)
-            except Exception:
-                await _send_text(cb.message)
+            await _edit_or_send(cb.message, card_text, reply_markup=kb)
     else:
         if photo_id or photo_url:
             try:
                 await message_or_cb.answer_photo(
                     photo=photo_id or photo_url,
                     caption=card_text,
-                    parse_mode="Markdown",
+                    parse_mode="HTML",
                     reply_markup=kb,
                 )
             except Exception:
@@ -917,7 +991,11 @@ async def cb_product_detail(callback: CallbackQuery):
         await callback.answer("هذا الزر قديم أو غير صالح. يرجى فتح القائمة من جديد.", show_alert=True)
         return
     async with AsyncSessionLocal() as session:
-        await show_product_detail(callback, product_id, session)
+        customer = await get_or_create_customer(session, callback.from_user)
+        await show_product_detail(
+            callback, product_id, session, language=customer.language_code or "ar"
+        )
+    await callback.answer()
 
 
 # ---------------- Quantity Selection & Multi-Quantity Purchasing ----------------
@@ -930,18 +1008,60 @@ async def cb_select_quantity(callback: CallbackQuery):
             await callback.answer("عذراً، هذا المنتج غير متوفر في المخزون حالياً.", show_alert=True)
             return
 
-        winner_link = pricing_info["winner_link"]
-        max_qty = winner_link.available_quantity if winner_link and winner_link.available_quantity else 50
+        winner_link = pricing_info.get("winner_link")
+        max_qty = int(winner_link.available_quantity) if winner_link and winner_link.available_quantity else 50
+        unit = Decimal(str(pricing_info.get("final_price") or 0))
+        unit_cents = int((unit * 100).quantize(Decimal("1")))
+        await callback.answer()
 
         text = (
-            f"📦 **تحديد الكمية المطلوبة:**\n\n"
-            f"اختر عدد القطع أو الاشتراكات التي ترغب بشرائها، أو اضغط زر الكمية المخصصة:"
+            f"📦 <b>تحديد الكمية</b>\n\n"
+            f"سعر القطعة: <code>${float(unit):.2f}</code>\n"
+            f"المتاح: <code>{max_qty}</code>\n\n"
+            f"استخدم ➖ / ➕ أو اختر كمية سريعة — الإجمالي يتحدث فوراً:"
         )
-        await callback.message.edit_text(
+        await _edit_or_send(
+            callback.message,
             text,
-            parse_mode="Markdown",
-            reply_markup=quantity_selector_keyboard(product_id, max_qty=max_qty)
+            reply_markup=quantity_selector_keyboard(
+                product_id, max_qty=max_qty, current_qty=1, unit_cents=unit_cents
+            ),
         )
+
+
+@router.callback_query(F.data.startswith("qty_adj:"))
+async def cb_qty_adjust(callback: CallbackQuery):
+    """+/- stepper and preset taps — recalculate total without leaving the card."""
+    parts = callback.data.split(":")
+    # qty_adj:{product_id}:{qty}:{unit_cents}:{max_qty}
+    if len(parts) < 5:
+        await callback.answer()
+        return
+    product_id, qty_s, unit_s, max_s = parts[1], parts[2], parts[3], parts[4]
+    try:
+        qty = max(1, int(qty_s))
+        unit_cents = max(0, int(unit_s))
+        max_qty = max(1, int(max_s))
+    except ValueError:
+        await callback.answer()
+        return
+    qty = min(qty, max_qty)
+    unit = unit_cents / 100.0
+    total = unit * qty
+    await callback.answer(f"${total:.2f}")
+    text = (
+        f"📦 <b>تحديد الكمية</b>\n\n"
+        f"سعر القطعة: <code>${unit:.2f}</code>\n"
+        f"الكمية: <b>{qty}</b> · الإجمالي: <b>${total:.2f}</b>\n"
+        f"المتاح: <code>{max_qty}</code>"
+    )
+    await _edit_or_send(
+        callback.message,
+        text,
+        reply_markup=quantity_selector_keyboard(
+            product_id, max_qty=max_qty, current_qty=qty, unit_cents=unit_cents
+        ),
+    )
 
 
 @router.callback_query(F.data.startswith("custom_qty:"))
@@ -951,7 +1071,7 @@ async def cb_custom_qty_prompt(callback: CallbackQuery, state: FSMContext):
     await state.update_data(product_id=product_id)
     await callback.message.edit_text(
         "🔢 **يرجى كتابة الكمية المطلوبة كرقم** (مثال: `4`):",
-        parse_mode="Markdown"
+        parse_mode="HTML"
     )
 
 
@@ -1004,7 +1124,7 @@ async def handle_buyer_email_for_checkout(message: Message, state: FSMContext):
     if input_type == "email" and not re.match(r"^[^@\s]+@[^@\s]+\.[^@\s]+$", value):
         await message.answer(
             "⚠️ بريد غير صالح. أرسل بريداً مثل `name@example.com`:",
-            parse_mode="Markdown",
+            parse_mode="HTML",
             reply_markup=cancel_fsm_keyboard(),
         )
         return
@@ -1020,7 +1140,7 @@ async def handle_buyer_email_for_checkout(message: Message, state: FSMContext):
         await message.delete()
     except Exception:
         pass
-    await message.answer(f"✅ تم الحفظ: `{value}`\nجاري إنشاء الطلب...", parse_mode="Markdown")
+    await message.answer(f"✅ تم الحفظ: `{value}`\nجاري إنشاء الطلب...", parse_mode="HTML")
     async with AsyncSessionLocal() as session:
         customer = await get_or_create_customer(session, message.from_user)
         await _execute_order_creation_flow(message, product_id, qty, customer, session, state=state)
@@ -1144,9 +1264,9 @@ async def _execute_order_creation_flow(
                 await state.set_state(CheckoutCustomerInputState.waiting_input)
                 await state.update_data(product_id=str(product_id), qty=qty, input_type=input_type)
             if isinstance(message_or_cb, CallbackQuery):
-                await message_or_cb.message.answer(prompt, parse_mode="Markdown", reply_markup=cancel_fsm_keyboard())
+                await message_or_cb.message.answer(prompt, parse_mode="HTML", reply_markup=cancel_fsm_keyboard())
             else:
-                await message_or_cb.answer(prompt, parse_mode="Markdown", reply_markup=cancel_fsm_keyboard())
+                await message_or_cb.answer(prompt, parse_mode="HTML", reply_markup=cancel_fsm_keyboard())
             return
         buyer_email = cached if isinstance(cached, str) else cached.decode()
 
@@ -1177,17 +1297,19 @@ async def _execute_order_creation_flow(
         f"يرجى اختيار وسيلة الدفع المفضلة لديك:"
     )
 
+    rails = await payment_rail_flags(session)
     kb = payment_methods_keyboard(
         order_id=str(order.id),
         total_price=float(order.our_price),
         has_wallet_balance=customer.wallet_balance > 0,
-        wallet_balance=float(customer.wallet_balance)
+        wallet_balance=float(customer.wallet_balance),
+        **rails,
     )
 
     if isinstance(message_or_cb, CallbackQuery):
-        await message_or_cb.message.edit_text(card_text, parse_mode="Markdown", reply_markup=kb)
+        await message_or_cb.message.edit_text(card_text, parse_mode="HTML", reply_markup=kb)
     else:
-        await message_or_cb.answer(card_text, parse_mode="Markdown", reply_markup=kb)
+        await message_or_cb.answer(card_text, parse_mode="HTML", reply_markup=kb)
 
 
 # ---------------- Hybrid / Split Payment Handlers ----------------
@@ -1214,8 +1336,10 @@ async def pay_split_prompt(callback: CallbackQuery):
         )
         await callback.message.edit_text(
             text,
-            parse_mode="Markdown",
-            reply_markup=split_payment_methods_keyboard(order_id, float(remainder))
+            parse_mode="HTML",
+            reply_markup=split_payment_methods_keyboard(
+                order_id, float(remainder), **(await payment_rail_flags(session))
+            )
         )
 
 
@@ -1273,7 +1397,7 @@ async def pay_split_usdt(callback: CallbackQuery):
         )
         await callback.message.edit_text(
             text,
-            parse_mode="Markdown",
+            parse_mode="HTML",
             reply_markup=crypto_payment_keyboard(
                 order_id=str(order.id),
                 address=str(invoice.deposit_address or ""),
@@ -1311,7 +1435,7 @@ async def pay_split_trc20(callback: CallbackQuery):
         )
         await callback.message.edit_text(
             text,
-            parse_mode="Markdown",
+            parse_mode="HTML",
             reply_markup=crypto_payment_keyboard(
                 order_id=str(order.id),
                 address=str(invoice.deposit_address or ""),
@@ -1352,7 +1476,7 @@ async def pay_split_binance(callback: CallbackQuery, state: FSMContext):
         )
         await callback.message.edit_text(
             text,
-            parse_mode="Markdown",
+            parse_mode="HTML",
             reply_markup=binance_payment_keyboard(order_id=str(order.id), pay_id=pay_id),
         )
 
@@ -1408,7 +1532,7 @@ async def pay_split_sham_cash(callback: CallbackQuery, state: FSMContext):
         )
         await callback.message.edit_text(
             text,
-            parse_mode="Markdown",
+            parse_mode="HTML",
             reply_markup=sham_cash_payment_keyboard(order_id=str(order.id), account_code=str(sham_acc or "")),
         )
 
@@ -1424,16 +1548,18 @@ async def cb_back_to_pay_options(callback: CallbackQuery):
             await callback.answer("الطلب غير موجود", show_alert=True)
             return
 
+        rails = await payment_rail_flags(session)
         await callback.message.edit_text(
             f"🛒 **تفاصيل الطلب:** #{order.order_number}\n\n"
             f"🔹 المبلغ المطلوب: `${order.our_price}` USD\n\n"
             f"يرجى اختيار وسيلة الدفع المفضلة لديك:",
-            parse_mode="Markdown",
+            parse_mode="HTML",
             reply_markup=payment_methods_keyboard(
                 order_id=str(order.id),
                 total_price=float(order.our_price),
                 has_wallet_balance=customer.wallet_balance > 0,
-                wallet_balance=float(customer.wallet_balance)
+                wallet_balance=float(customer.wallet_balance),
+                **rails,
             )
         )
 
@@ -1472,7 +1598,7 @@ async def pay_usdt_bep20(callback: CallbackQuery):
         )
         await callback.message.edit_text(
             text,
-            parse_mode="Markdown",
+            parse_mode="HTML",
             reply_markup=crypto_payment_keyboard(
                 order_id=str(order.id),
                 address=str(deposit_addr or ""),
@@ -1518,7 +1644,7 @@ async def pay_usdt_trc20(callback: CallbackQuery):
         )
         await callback.message.edit_text(
             text,
-            parse_mode="Markdown",
+            parse_mode="HTML",
             reply_markup=crypto_payment_keyboard(
                 order_id=str(order.id),
                 address=tron_addr,
@@ -1566,16 +1692,19 @@ async def pay_binance_pay(callback: CallbackQuery, state: FSMContext):
         )
         await callback.message.edit_text(
             text,
-            parse_mode="Markdown",
+            parse_mode="HTML",
             reply_markup=binance_payment_keyboard(order_id=str(order.id), pay_id=pay_id),
         )
 
 
 @router.callback_query(F.data.startswith("pay:balance:"))
 async def pay_balance(callback: CallbackQuery):
+    from src.bot.effects import EFFECT_CELEBRATION, send_with_effect
+    from src.bot.i18n import t, normalize_lang
     order_id = callback.data.split(":")[2]
     async with AsyncSessionLocal() as session:
         customer = await get_or_create_customer(session, callback.from_user)
+        lang = normalize_lang(customer.language_code)
         stmt = (
             select(Order)
             .where(Order.id == _as_uuid(order_id))
@@ -1595,10 +1724,22 @@ async def pay_balance(callback: CallbackQuery):
             return
 
         if customer.wallet_balance < order.our_price:
-            await callback.answer("رصيدك الحالي غير كافٍ لإتمام العملية.", show_alert=True)
+            await callback.answer()
+            need = float(order.our_price - (customer.wallet_balance or 0))
+            text = f"{t(lang, 'low_balance')}\n≈ <b>${need:.2f}</b>"
+            kb = InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="💳 $10", callback_data="topup_amt:10"),
+                 InlineKeyboardButton(text="💳 $25", callback_data="topup_amt:25")],
+                [InlineKeyboardButton(text="🏦 شام كاش للطلب", callback_data=f"pay:sham_cash:{order_id}")],
+                [InlineKeyboardButton(text="↩️ رجوع", callback_data=f"pay_options:{order_id}")],
+            ])
+            try:
+                await callback.message.edit_text(text, parse_mode="HTML", reply_markup=kb)
+            except Exception:
+                await callback.message.answer(text, parse_mode="HTML", reply_markup=kb)
             return
 
-        # Atomically deduct customer wallet balance
+        await callback.answer()
         await order_service.debit_customer_wallet(
             session=session,
             customer_id=str(customer.id),
@@ -1615,16 +1756,24 @@ async def pay_balance(callback: CallbackQuery):
             session, order, OrderState.PAYMENT_CONFIRMED, "customer_balance_payment"
         )
         await session.commit()
+        await session.refresh(customer)
 
-        await callback.message.edit_text(
-            f"✅ **تم خصم المبلغ من رصيدك بنجاح!**\n\n"
-            f"🔖 رقم الطلب: `#{order.order_number}`\n"
-            f"💰 المبلغ المخصوم: `${order.our_price}`\n"
-            f"👛 الرصيد المتبقي: `${customer.wallet_balance:.2f} USD`\n\n"
-            f"⚡ تم تأكيد الدفع — جاري تأمين وتسليم منتجك الآن...",
-            parse_mode="Markdown"
+        ok_text = (
+            f"{t(lang, 'buy_success')}\n\n"
+            f"🔖 <code>#{order.order_number}</code>\n"
+            f"💰 <b>${order.our_price}</b>\n"
+            f"👛 <b>${float(customer.wallet_balance or 0):.2f}</b>"
         )
-
+        try:
+            await callback.message.edit_text(ok_text, parse_mode="HTML")
+        except Exception:
+            pass
+        await send_with_effect(
+            callback.bot,
+            chat_id=callback.from_user.id,
+            text=ok_text,
+            effect_id=EFFECT_CELEBRATION,
+        )
         await enqueue_jit_order(str(order.id))
 
 
@@ -1659,7 +1808,7 @@ async def pay_sham_cash(callback: CallbackQuery, state: FSMContext):
         )
         await callback.message.edit_text(
             text,
-            parse_mode="Markdown",
+            parse_mode="HTML",
             reply_markup=sham_cash_payment_keyboard(order_id=order_id, account_code=str(sham_acc or "")),
         )
 
@@ -1695,7 +1844,7 @@ async def handle_sham_cash_tx_ref(message: Message, state: FSMContext):
     await message.answer(
         f"✅ تم تسجيل رقم العملية: `{tx_ref}`\n\n"
         f"📎 **الخطوة 2 من 2:** أرسل الآن **صورة الإيصال أو ملف PDF** لتأكيد الطلب:",
-        parse_mode="Markdown",
+        parse_mode="HTML",
     )
 
 
@@ -1860,7 +2009,7 @@ async def cb_binance_oid_prompt(callback: CallbackQuery, state: FSMContext):
     await callback.message.edit_text(
         "🟡 **الصق Pay Order ID هنا الآن**\n\n"
         "بعد التحويل من تطبيق Binance، انسخ Order ID / Transaction ID وأرسله في رسالة.",
-        parse_mode="Markdown",
+        parse_mode="HTML",
         reply_markup=InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton(text="↩️ رجوع", callback_data=f"pay:binance_pay:{order_id}")],
         ]),
@@ -1894,7 +2043,7 @@ async def cb_pay_help(callback: CallbackQuery):
         back = f"pay_options:{order_id}" if order_id else "nav:home"
     await callback.message.edit_text(
         text,
-        parse_mode="Markdown",
+        parse_mode="HTML",
         reply_markup=InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton(text="↩️ رجوع", callback_data=back)],
         ]),
@@ -1958,7 +2107,7 @@ async def handle_binance_pay_order_id(message: Message, state: FSMContext):
                         await message.answer(
                             f"✅ تم التحقق تلقائياً من Binance Pay!\n"
                             f"🔖 الطلب `{order.order_number}` — جاري التسليم الفوري...",
-                            parse_mode="Markdown",
+                            parse_mode="HTML",
                             reply_markup=main_menu_keyboard(),
                         )
                         return
@@ -2073,7 +2222,7 @@ async def admin_approve_sham_cash(callback: CallbackQuery):
 
         await callback.message.edit_caption(
             caption=f"✅ تمت الموافقة على الطلب `{order.order_number}` وجاري التوريد آلياً!",
-            parse_mode="Markdown"
+            parse_mode="HTML"
         )
 
 
@@ -2115,7 +2264,7 @@ async def admin_reject_sham_cash(callback: CallbackQuery):
 
         await callback.message.edit_caption(
             caption=f"❌ تم رفض إيصال الطلب `{order.order_number}`.",
-            parse_mode="Markdown"
+            parse_mode="HTML"
         )
 
 
@@ -2137,7 +2286,7 @@ async def cb_search_start(callback: CallbackQuery, state: FSMContext):
             [InlineKeyboardButton(text="🔙 إلغاء والعودة للرئيسية", callback_data="nav:home")]
         ]
     )
-    await callback.message.edit_text(text, parse_mode="Markdown", reply_markup=kb)
+    await callback.message.edit_text(text, parse_mode="HTML", reply_markup=kb)
 
 
 @router.message(SearchProductState.waiting_for_query, F.text)
@@ -2181,7 +2330,7 @@ async def process_search_query(message: Message, state: FSMContext):
             await message.answer(
                 f"❌ لم يتم العثور على أي نتائج مطابقة لـ: `{query}`\n"
                 f"جرّب البحث بكلمة أخرى أو تصفح الأقسام.",
-                parse_mode="Markdown",
+                parse_mode="HTML",
                 reply_markup=kb
             )
             return
@@ -2228,9 +2377,9 @@ async def _render_search_results(message_or_cb, session, products, query, *, in_
     )
     kb = InlineKeyboardMarkup(inline_keyboard=buttons)
     if isinstance(message_or_cb, CallbackQuery):
-        await message_or_cb.message.edit_text(text, parse_mode="Markdown", reply_markup=kb)
+        await message_or_cb.message.edit_text(text, parse_mode="HTML", reply_markup=kb)
     else:
-        await message_or_cb.answer(text, parse_mode="Markdown", reply_markup=kb)
+        await message_or_cb.answer(text, parse_mode="HTML", reply_markup=kb)
 
 
 @router.callback_query(F.data.startswith("searchf:"))
@@ -2281,20 +2430,21 @@ async def cb_faq(callback: CallbackQuery):
                 [InlineKeyboardButton(text="🔙 العودة للقائمة الرئيسية", callback_data="nav:home")],
             ]
         )
-        await callback.message.edit_text(faq_text, parse_mode="Markdown", reply_markup=kb)
+        await callback.message.edit_text(faq_text, parse_mode="HTML", reply_markup=kb)
 
 
 # ---------------- 3. Language Preference Toggle ----------------
 @router.callback_query(F.data == "nav:toggle_lang")
 async def cb_toggle_lang(callback: CallbackQuery):
+    from src.bot.i18n import t, normalize_lang
     async with AsyncSessionLocal() as session:
         customer = await get_or_create_customer(session, callback.from_user)
-        new_lang = "ar" if customer.language_code == "en" else "en"
+        new_lang = "ar" if normalize_lang(customer.language_code) == "en" else "en"
         customer.language_code = new_lang
         await session.commit()
-        await callback.answer(f"🌐 تم تعيين تفضيل اللغة إلى: {new_lang.upper()}", show_alert=False)
+        await callback.answer(t(new_lang, "lang_switched"), show_alert=False)
         text, kb = await render_welcome_hub(customer, session)
-        await callback.message.edit_text(text, parse_mode="Markdown", reply_markup=kb)
+        await callback.message.edit_text(text, parse_mode="HTML", reply_markup=kb)
 
 
 # ---------------- 4. Multi-Method Wallet Top-Up ----------------
@@ -2321,10 +2471,11 @@ async def cb_topup_preset(callback: CallbackQuery):
             f"{bonus_msg}\n\n"
             f"اختر وسيلة الدفع التي تناسبك لإتمام الشحن:"
         )
+        rails = await payment_rail_flags(session)
         await callback.message.edit_text(
             text,
-            parse_mode="Markdown",
-            reply_markup=topup_methods_keyboard(amount)
+            parse_mode="HTML",
+            reply_markup=topup_methods_keyboard(amount, **rails),
         )
 
 
@@ -2342,7 +2493,7 @@ async def cb_topup_custom(callback: CallbackQuery, state: FSMContext):
             [InlineKeyboardButton(text="🔙 إلغاء", callback_data="user:wallet")]
         ]
     )
-    await callback.message.edit_text(text, parse_mode="Markdown", reply_markup=kb)
+    await callback.message.edit_text(text, parse_mode="HTML", reply_markup=kb)
 
 
 @router.message(TopUpCustomAmountState.waiting_for_amount, F.text)
@@ -2375,10 +2526,11 @@ async def process_topup_custom_amount(message: Message, state: FSMContext):
             f"{bonus_msg}\n\n"
             f"اختر وسيلة الدفع التي تناسبك لإتمام الشحن:"
         )
+        rails = await payment_rail_flags(session)
         await message.answer(
             text,
-            parse_mode="Markdown",
-            reply_markup=topup_methods_keyboard(amount)
+            parse_mode="HTML",
+            reply_markup=topup_methods_keyboard(amount, **rails),
         )
 
 
@@ -2447,7 +2599,7 @@ async def cb_topup_payment_details(callback: CallbackQuery):
                 [InlineKeyboardButton(text="🔙 العودة للمحفظة", callback_data="user:wallet")],
             ]
         )
-        await callback.message.edit_text(text, parse_mode="Markdown", reply_markup=kb)
+        await callback.message.edit_text(text, parse_mode="HTML", reply_markup=kb)
 
 
 # ---------------- 5. Coupon System & Checkout Discount ----------------
@@ -2464,10 +2616,10 @@ async def cb_apply_coupon_prompt(callback: CallbackQuery, state: FSMContext):
     )
     kb = InlineKeyboardMarkup(
         inline_keyboard=[
-            [InlineKeyboardButton(text="🔙 إلغاء والعودة", callback_data=f"buy_qty:{order_id}:1")]
+            [InlineKeyboardButton(text="🔙 إلغاء والعودة", callback_data=f"pay_options:{order_id}")]
         ]
     )
-    await callback.message.edit_text(text, parse_mode="Markdown", reply_markup=kb)
+    await callback.message.edit_text(text, parse_mode="HTML", reply_markup=kb)
 
 
 @router.message(ApplyCouponState.waiting_for_code, F.text)
@@ -2563,13 +2715,15 @@ async def process_coupon_code(message: Message, state: FSMContext):
             f"👛 **رصيدك الحالي:** `${customer.wallet_balance:.2f}` USD\n\n"
             f"يرجى اختيار وسيلة الدفع لإتمام الشراء:"
         )
+        rails = await payment_rail_flags(session)
         kb = payment_methods_keyboard(
             order_id=str(order.id),
             total_price=float(order.our_price),
             has_wallet_balance=customer.wallet_balance > 0,
-            wallet_balance=float(customer.wallet_balance)
+            wallet_balance=float(customer.wallet_balance),
+            **rails,
         )
-        await message.answer(card_text, parse_mode="Markdown", reply_markup=kb)
+        await message.answer(card_text, parse_mode="HTML", reply_markup=kb)
 
 
 # ---------------- 6. Verified 1-Click Reviews ----------------

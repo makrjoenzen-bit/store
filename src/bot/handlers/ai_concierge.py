@@ -105,6 +105,6 @@ async def handle_free_text_concierge(message: Message, state: FSMContext):
 
     await message.answer(
         result.get("reply_ar") or "…",
-        parse_mode="Markdown",
+        parse_mode="HTML",
         reply_markup=_build_cta_keyboard(result),
     )

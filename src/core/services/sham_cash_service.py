@@ -221,9 +221,10 @@ class ShamCashService:
             await event_bus.publish("bot:send_message", {
                 "telegram_id": order.customer.telegram_id,
                 "text": (
-                    f"⚡ تم تأكيد الدفع — جاري تأمين وتسليم منتجك الآن...\n\n"
-                    f"🔖 رقم الطلب: `{order.order_number}`"
+                    "✅ تم تأكيد الدفع — جاري تأمين وتسليم منتجك الآن...\n\n"
+                    f"🔖 رقم الطلب: <code>{order.order_number}</code>"
                 ),
+                "effect_id": "5046509860389126442",  # celebration confetti
             })
 
         if trigger_jit:

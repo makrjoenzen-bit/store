@@ -11,6 +11,7 @@ import {
 interface BotConfigState {
   welcome_message_ar: string;
   welcome_message_en: string;
+  sham_cash_account_number: string;
   sham_cash_instructions_ar: string;
   sham_cash_usd_to_syp_rate: number;
   sham_cash_accept_syp: boolean;
@@ -23,12 +24,17 @@ interface BotConfigState {
   proof_channel_id: string;
   proof_channel_url: string;
   auto_post_proofs_enabled: boolean;
+  maintenance_mode: boolean;
+  pay_sham_cash_enabled: boolean;
+  pay_usdt_enabled: boolean;
+  pay_binance_enabled: boolean;
 }
 
 export default function BotConfigPage() {
   const [configs, setConfigs] = useState<BotConfigState>({
     welcome_message_ar: "أهلاً بك في المتجر الرقمي الآلي! 🌟\nنوفر لك أفضل أسعار اشتراكات الذكاء الاصطناعي مع تسليم فوري.",
     welcome_message_en: "Welcome to the instant digital shop!",
+    sham_cash_account_number: "0991234567",
     sham_cash_instructions_ar: "قم بالتحويل عبر شام كاش للحساب: 0912345678\nثم أرسل صورة إشعار التحويل هنا للمراجعة الفورية.",
     sham_cash_usd_to_syp_rate: 11500,
     sham_cash_accept_syp: true,
@@ -41,6 +47,10 @@ export default function BotConfigPage() {
     proof_channel_id: "",
     proof_channel_url: "",
     auto_post_proofs_enabled: true,
+    maintenance_mode: false,
+    pay_sham_cash_enabled: true,
+    pay_usdt_enabled: true,
+    pay_binance_enabled: true,
   });
 
   const [saved, setSaved] = useState(false);
@@ -53,21 +63,28 @@ export default function BotConfigPage() {
         const res = await fetch("/api/bot-config");
         if (res.ok) {
           const data = await res.json();
+          const truthy = (v: any, d = false) =>
+            v === true || v === "true" || v === 1 || v === "1" || (v == null ? d : false);
           setConfigs({
             welcome_message_ar: data.welcome_message_ar || "أهلاً بك في المتجر الرقمي الآلي! 🌟\nنوفر لك أفضل أسعار اشتراكات الذكاء الاصطناعي مع تسليم فوري.",
             welcome_message_en: data.welcome_message_en || "Welcome to the instant digital shop!",
+            sham_cash_account_number: data.sham_cash_account_number || "0991234567",
             sham_cash_instructions_ar: data.sham_cash_instructions_ar || "قم بالتحويل عبر شام كاش للحساب: 0912345678\nثم أرسل صورة إشعار التحويل هنا للمراجعة الفورية.",
             sham_cash_usd_to_syp_rate: Number(data.sham_cash_usd_to_syp_rate ?? 11500),
             sham_cash_accept_syp: data.sham_cash_accept_syp !== false && data.sham_cash_accept_syp !== "false",
             cashback_percent: Number(data.cashback_percent ?? 2),
             min_order_value: data.min_order_value ?? 1.0,
             payment_ingest_provider: data.payment_ingest_provider || "direct_web3",
-            force_subscribe_enabled: data.force_subscribe_enabled === true || data.force_subscribe_enabled === "true",
+            force_subscribe_enabled: truthy(data.force_subscribe_enabled, false),
             main_channel_id: data.main_channel_id || "",
             main_channel_url: data.main_channel_url || "",
             proof_channel_id: data.proof_channel_id || "",
             proof_channel_url: data.proof_channel_url || "",
             auto_post_proofs_enabled: data.auto_post_proofs_enabled !== false && data.auto_post_proofs_enabled !== "false",
+            maintenance_mode: truthy(data.maintenance_mode, false),
+            pay_sham_cash_enabled: data.pay_sham_cash_enabled !== false && data.pay_sham_cash_enabled !== "false",
+            pay_usdt_enabled: data.pay_usdt_enabled !== false && data.pay_usdt_enabled !== "false",
+            pay_binance_enabled: data.pay_binance_enabled !== false && data.pay_binance_enabled !== "false",
           });
         }
       } catch (e) {
@@ -154,6 +171,19 @@ export default function BotConfigPage() {
                   />
                 </div>
 
+                <div>
+                  <label className="block text-slate-300 font-semibold mb-2">
+                    رقم / كود حساب شام كاش:
+                  </label>
+                  <input
+                    type="text"
+                    value={configs.sham_cash_account_number}
+                    onChange={(e) => setConfigs({ ...configs, sham_cash_account_number: e.target.value })}
+                    className="w-full px-4 py-2.5 rounded-xl bg-obsidian-950 border border-white/[0.08] text-white font-mono focus:outline-none focus:border-indigo-500"
+                    placeholder="0991234567"
+                  />
+                </div>
+
                 {/* Sham Cash Instructions */}
                 <div>
                   <label className="block text-slate-300 font-semibold mb-2">
@@ -166,6 +196,25 @@ export default function BotConfigPage() {
                     className="w-full px-4 py-3 rounded-2xl bg-obsidian-950 border border-white/[0.08] text-white text-xs leading-relaxed focus:outline-none focus:border-indigo-500 transition font-sans"
                     placeholder="أدخل أرقام الحسابات وطريقة إرسال الإشعار..."
                   />
+                </div>
+
+                <div className="grid grid-cols-2 md:grid-cols-4 gap-3 pt-1">
+                  {([
+                    ["pay_sham_cash_enabled", "شام كاش"],
+                    ["pay_usdt_enabled", "USDT"],
+                    ["pay_binance_enabled", "Binance Pay"],
+                    ["maintenance_mode", "وضع الصيانة"],
+                  ] as const).map(([key, label]) => (
+                    <label key={key} className="flex items-center gap-2 text-xs text-slate-300 cursor-pointer rounded-xl border border-white/[0.08] px-3 py-2">
+                      <input
+                        type="checkbox"
+                        checked={Boolean(configs[key])}
+                        onChange={(e) => setConfigs({ ...configs, [key]: e.target.checked })}
+                        className="rounded border-white/20"
+                      />
+                      {label}
+                    </label>
+                  ))}
                 </div>
 
                 <div className="grid grid-cols-1 md:grid-cols-3 gap-4">

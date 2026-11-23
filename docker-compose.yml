@@ -163,13 +163,15 @@ services:
     build:
       context: ./dashboard
       dockerfile: Dockerfile
+      args:
+        BACKEND_INTERNAL_URL: http://backend:8000
     container_name: jit_admin_dashboard
     restart: always
     ports:
       - "3000:3000"
     environment:
-      NEXT_PUBLIC_API_URL: http://localhost:8000/api
-      NEXT_PUBLIC_WS_URL: ws://localhost:8000/ws
+      # Server-side rewrite target only — browsers always use relative /api and /ws via Nginx
+      BACKEND_INTERNAL_URL: http://backend:8000
     depends_on:
       backend:
         condition: service_started

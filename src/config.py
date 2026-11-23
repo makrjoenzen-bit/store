@@ -28,6 +28,10 @@ class Settings(BaseSettings):
     JWT_ALGORITHM: str = "HS256"
     ACCESS_TOKEN_EXPIRE_MINUTES: int = 1440
     ENCRYPTION_MASTER_KEY: str = _DEFAULT_FERNET
+    # Dashboard admin bootstrap credentials (synced into AdminUser on login)
+    ADMIN_USERNAME: str = "admin"
+    ADMIN_PASSWORD: Optional[str] = None
+    AUTH_COOKIE_NAME: str = "access_token"
 
     # Telegram — Customer Store Bot
     TELEGRAM_BOT_TOKEN: str = ""

@@ -19,7 +19,7 @@ export default function OrdersPage() {
   const fetchOrders = async () => {
     try {
       const url = filterState === "all" ? "/api/orders?limit=60" : `/api/orders?state=${filterState}&limit=60`;
-      const res = await fetch(url);
+      const res = await fetch(url, { credentials: "include" });
       if (res.ok) {
         const data = await res.json();
         setOrders(Array.isArray(data) ? data : []);
@@ -39,7 +39,7 @@ export default function OrdersPage() {
 
   const handleOpenOrderDetails = async (orderId: string) => {
     try {
-      const res = await fetch(`/api/orders/${orderId}`);
+      const res = await fetch(`/api/orders/${orderId}`, { credentials: "include" });
       if (res.ok) {
         const data = await res.json();
         setOrderDetails(data);
@@ -64,14 +64,9 @@ export default function OrdersPage() {
       {/* Header */}
       <div className="flex flex-col md:flex-row items-start md:items-center justify-between gap-4 border-b border-white/[0.06] pb-6">
         <div>
-          <h1 className="text-2xl lg:text-3xl font-extrabold tracking-tight text-white flex items-center gap-2">
-            <span>سجل المعاملات وتدفق الطلبات</span>
-            <span className="text-xs font-mono font-normal text-sky-400 px-2 py-0.5 rounded-full bg-sky-500/10 border border-sky-500/20">
-              AUDIT TRAIL
-            </span>
-          </h1>
+          <h1 className="text-2xl font-bold tracking-tight text-white">الطلبات</h1>
           <p className="text-sm text-slate-400 mt-1">
-            متابعة دورة حياة كل طلب، حالات التمويل اللحظي (JIT Funding)، وتتبع المعاملات على البلوكشين.
+            متابعة الطلبات ومراجعة المدفوعات اليدوية (شام كاش) من مكان واحد.
           </p>
         </div>
 

@@ -92,7 +92,7 @@ async def cb_start_dispute(callback: CallbackQuery, state: FSMContext):
             f"{warranty_note}\n"
             f"يرجى تحديد نوع المشكلة التي تواجهها لمساعدتك فوراً:"
         )
-        await callback.message.edit_text(text, parse_mode="Markdown", reply_markup=dispute_reasons_keyboard(order_id))
+        await callback.message.edit_text(text, parse_mode="HTML", reply_markup=dispute_reasons_keyboard(order_id))
 
 
 @router.callback_query(DisputeState.waiting_for_issue_type, F.data.startswith("disp_reason:"))
@@ -115,7 +115,7 @@ async def cb_select_dispute_reason(callback: CallbackQuery, state: FSMContext):
         f"📝 **نوع المشكلة:** {subject}\n\n"
         f"يرجى كتابة **شرح مفصل للمشكلة** التي واجهتك أثناء التفعيل:"
     )
-    await callback.message.edit_text(text, parse_mode="Markdown")
+    await callback.message.edit_text(text, parse_mode="HTML")
 
 
 @router.message(DisputeState.waiting_for_details, F.text)
@@ -244,13 +244,13 @@ async def _finalize_ticket_creation(bot, user, order_id, order_number, subject, 
                         chat_id=settings.ADMIN_TELEGRAM_ID,
                         photo=photo_file_id,
                         caption=alert_text,
-                        parse_mode="Markdown"
+                        parse_mode="HTML"
                     )
                 else:
                     await bot.send_message(
                         chat_id=settings.ADMIN_TELEGRAM_ID,
                         text=alert_text,
-                        parse_mode="Markdown"
+                        parse_mode="HTML"
                     )
             except Exception as e:
                 logger.error(f"Failed to alert admin of new ticket: {e}")
@@ -262,8 +262,8 @@ async def _finalize_ticket_creation(bot, user, order_id, order_number, subject, 
             f"تم إشعار فريق الدعم الفني بمشكلتك، وسيصلك الرد أو التعويض مباشرة في هذه المحادثة."
         )
         if isinstance(reply_target, Message):
-            await reply_target.answer(confirm_text, parse_mode="Markdown")
+            await reply_target.answer(confirm_text, parse_mode="HTML")
         elif isinstance(reply_target, CallbackQuery):
-            await reply_target.message.edit_text(confirm_text, parse_mode="Markdown")
+            await reply_target.message.edit_text(confirm_text, parse_mode="HTML")
         else:
-            await bot.send_message(chat_id=user.id, text=confirm_text, parse_mode="Markdown")
+            await bot.send_message(chat_id=user.id, text=confirm_text, parse_mode="HTML")

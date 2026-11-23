@@ -46,6 +46,11 @@ async def cb_home(callback: CallbackQuery):
     await callback.answer()
 
 
+@router.callback_query(F.data == "noop")
+async def cb_noop(callback: CallbackQuery):
+    await callback.answer()
+
+
 # Alias staff menu label → orders hub
 @router.message(F.text == "🧾 طلبات المراجعة (شام كاش / باينانس)")
 async def msg_staff_orders(message: Message):

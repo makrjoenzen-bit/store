@@ -174,13 +174,15 @@ async def bcast_audience(callback: CallbackQuery, state: FSMContext):
     aud = callback.data.split(":")[-1]
     await state.update_data(audience=aud)
     await state.set_state(BroadcastFSM.message)
-    await callback.message.edit_text("✍️ أرسل نص البث:")
+    await callback.message.edit_text("✍️ أرسل نص البث أو صورة مع تعليق:")
     await callback.answer()
 
 
 @router.message(BroadcastFSM.message)
 async def bcast_preview(message: Message, state: FSMContext):
-    await state.update_data(message_text=message.text or "")
+    photo_id = message.photo[-1].file_id if message.photo else None
+    caption = (message.caption or message.text or "").strip()
+    await state.update_data(message_text=caption, photo_file_id=photo_id)
     data = await state.get_data()
     await state.set_state(BroadcastFSM.confirm)
     kb = InlineKeyboardMarkup(inline_keyboard=[
@@ -192,14 +194,17 @@ async def bcast_preview(message: Message, state: FSMContext):
         "buyers_only": "المشترين",
         "balance_holders": "ذوي الرصيد",
     }
-    await message.answer(
-        f"📋 **معاينة البث**\n\n"
-        f"الجمهور: **{labels.get(data['audience'], data['audience'])}**\n\n"
-        f"{data['message_text']}\n\n"
-        f"هل تريد الإرسال؟",
-        parse_mode="Markdown",
-        reply_markup=kb,
+    preview = (
+        f"📋 <b>معاينة البث</b>\n\n"
+        f"الجمهور: <b>{labels.get(data['audience'], data['audience'])}</b>\n"
+        f"{'🖼 مع صورة' if photo_id else 'نص فقط'}\n\n"
+        f"{caption or '—'}\n\n"
+        f"هل تريد الإرسال؟"
     )
+    if photo_id:
+        await message.answer_photo(photo_id, caption=preview, parse_mode="HTML", reply_markup=kb)
+    else:
+        await message.answer(preview, parse_mode="HTML", reply_markup=kb)
 
 
 @router.callback_query(F.data == "adm:mkt:bcast:go")
@@ -214,13 +219,16 @@ async def bcast_go(callback: CallbackQuery, state: FSMContext):
                 target_audience=data.get("audience") or "all",
                 reviewer=f"tg:{callback.from_user.id}",
                 launch=True,
+                photo_file_id=data.get("photo_file_id"),
             )
         await state.clear()
-        await callback.message.edit_text(
-            f"✅ تم إطلاق البث `{result['campaign_id'][:8]}` بمعدل ~25 رسالة/ثانية.",
-            parse_mode="Markdown",
-            reply_markup=_hub_kb(),
+        done = (
+            f"✅ تم إطلاق البث `{result['campaign_id'][:8]}` بمعدل ~25 رسالة/ثانية."
         )
+        try:
+            await callback.message.edit_text(done, parse_mode="Markdown", reply_markup=_hub_kb())
+        except Exception:
+            await callback.message.answer(done, parse_mode="Markdown", reply_markup=_hub_kb())
         await callback.answer()
     except ValueError as e:
         await callback.answer(str(e)[:160], show_alert=True)
