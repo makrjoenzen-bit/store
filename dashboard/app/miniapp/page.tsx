@@ -38,6 +38,11 @@ const COPY = {
     success: "تم بنجاح ✨",
     needTopup: "رصيدك غير كافٍ — اشحن ثم أعد المحاولة",
     inStock: "متوفر",
+    statePreparing: "جاري التجهيز (30–60 دقيقة)",
+    preparingHint: "طلبك قيد التجهيز — التسليم خلال المدة المتبقية",
+    stateDelivered: "تم التسليم",
+    stateCompleted: "مكتمل",
+    stateAwaiting: "بانتظار الدفع",
   },
   en: {
     store: "Store",
@@ -71,8 +76,84 @@ const COPY = {
     success: "Success ✨",
     needTopup: "Insufficient balance — top up then retry",
     inStock: "In stock",
+    statePreparing: "Preparing (30–60 min)",
+    preparingHint: "Your order is being prepared — delivery within the remaining time",
+    stateDelivered: "Delivered",
+    stateCompleted: "Completed",
+    stateAwaiting: "Awaiting payment",
   },
 };
+
+function formatMmSs(totalSec: number): string {
+  const s = Math.max(0, Math.floor(totalSec));
+  const m = Math.floor(s / 60);
+  const r = s % 60;
+  return `${String(m).padStart(2, "0")}:${String(r).padStart(2, "0")}`;
+}
+
+function ManualPrepTimer({
+  deadlineIso,
+  lang,
+  hint,
+  hintColor,
+  accent,
+}: {
+  deadlineIso?: string | null;
+  lang: Lang;
+  hint: string;
+  hintColor: string;
+  accent: string;
+}) {
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    const id = setInterval(() => setNow(Date.now()), 1000);
+    return () => clearInterval(id);
+  }, []);
+  const deadlineMs = deadlineIso ? new Date(deadlineIso).getTime() : NaN;
+  const hasDeadline = Number.isFinite(deadlineMs);
+  const remSec = hasDeadline ? Math.max(0, Math.floor((deadlineMs - now) / 1000)) : 0;
+  const slaSec = 60 * 60;
+  const elapsedRatio = hasDeadline
+    ? Math.min(1, Math.max(0, 1 - remSec / slaSec))
+    : 0.15;
+  const pct = Math.round(elapsedRatio * 100);
+  const pulse = Math.floor(now / 1000) % 2 === 0 ? "⏳" : "⌛";
+
+  return (
+    <div className="mt-2 space-y-1.5">
+      <div className="flex items-center justify-between text-xs">
+        <span className="inline-flex items-center gap-1.5 font-semibold" style={{ color: accent }}>
+          <span className="inline-block animate-pulse text-base leading-none">{pulse}</span>
+          {lang === "ar" ? "العدّاد المباشر" : "Live countdown"}
+        </span>
+        <span className="font-mono tabular-nums text-sm font-bold" style={{ color: accent }}>
+          {hasDeadline ? formatMmSs(remSec) : "—"}
+        </span>
+      </div>
+      <div
+        className="h-1.5 w-full overflow-hidden rounded-full"
+        style={{ background: `${hintColor}33` }}
+      >
+        <div
+          className="h-full rounded-full transition-[width] duration-1000 ease-linear"
+          style={{ width: `${pct}%`, background: accent }}
+        />
+      </div>
+      <div className="text-[11px] leading-relaxed" style={{ color: hintColor }}>
+        {hint}
+      </div>
+    </div>
+  );
+}
+
+function formatOrderState(state: string, t: (typeof COPY)["ar"]): string {
+  const s = (state || "").toLowerCase();
+  if (s === "pending_manual_delivery") return t.statePreparing;
+  if (s === "delivered" || s === "order_fulfilled") return t.stateDelivered;
+  if (s === "completed") return t.stateCompleted;
+  if (s === "awaiting_payment" || s === "created") return t.stateAwaiting;
+  return state?.replace(/_/g, " ") || "—";
+}
 
 type TgWebApp = {
   ready?: () => void;
@@ -207,6 +288,8 @@ export default function MiniAppPage() {
   const [topupAmount, setTopupAmount] = useState<number>(10);
   const [topupCustom, setTopupCustom] = useState("");
   const [topupNetwork, setTopupNetwork] = useState<string>("sham_cash");
+  const [shamQrUrl, setShamQrUrl] = useState<string>("");
+  const [shamAccount, setShamAccount] = useState<string>("");
 
   const t = COPY[lang];
   const dir = lang === "ar" ? "rtl" : "ltr";
@@ -390,11 +473,14 @@ export default function MiniAppPage() {
       setTimeout(() => setShowSuccess(false), 1400);
       const inv = res?.invoice;
       const addr = inv?.deposit_address || inv?.unique_amount;
+      const qr = inv?.sham_cash_qr_url || profile?.config?.sham_cash_qr_url;
       setMsg(
         lang === "ar"
-          ? `تم إنشاء فاتورة شحن $${amount.toFixed(2)} — ${addr ? `التفاصيل: ${addr}` : "بانتظار الدفع"}`
-          : `Top-up invoice $${amount.toFixed(2)} created — ${addr ? `details: ${addr}` : "awaiting payment"}`
+          ? `تم إنشاء فاتورة شحن $${amount.toFixed(2)} — ${addr ? `التفاصيل: ${addr}` : "بانتظار الدفع"}${qr ? " (QR جاهز أدناه)" : ""}`
+          : `Top-up invoice $${amount.toFixed(2)} created — ${addr ? `details: ${addr}` : "awaiting payment"}${qr ? " (QR below)" : ""}`
       );
+      if (qr) setShamQrUrl(qr);
+      if (inv?.sham_cash_account_number) setShamAccount(inv.sham_cash_account_number);
       await load();
     } catch (e: any) {
       haptic("error");
@@ -565,12 +651,21 @@ export default function MiniAppPage() {
                 >
                   <div className="flex justify-between text-sm">
                     <span className="font-mono">{o.order_number}</span>
-                    <span style={{ color: hint }}>{o.state}</span>
+                    <span style={{ color: hint }}>{formatOrderState(o.state, t)}</span>
                   </div>
                   <div className="text-xs" style={{ color: hint }}>{o.product_title || o.title_ar || "—"}</div>
                   <div className="text-sm font-semibold" style={{ color: button }}>
                     ${Number(o.our_price || o.amount || 0).toFixed(2)}
                   </div>
+                  {(o.state || "").toLowerCase() === "pending_manual_delivery" && (
+                    <ManualPrepTimer
+                      deadlineIso={o.manual_deadline_at}
+                      lang={lang}
+                      hint={t.preparingHint}
+                      hintColor={hint}
+                      accent={button}
+                    />
+                  )}
                 </button>
               ))
             )}
@@ -668,6 +763,20 @@ export default function MiniAppPage() {
               >
                 {t.topupConfirm} · ${Number(resolvedTopupAmount || 0).toFixed(2)}
               </button>
+
+              {topupNetwork === "sham_cash" && (shamQrUrl || profile?.config?.sham_cash_qr_url) && (
+                <div className="pt-2 space-y-2 text-center">
+                  {/* eslint-disable-next-line @next/next/no-img-element */}
+                  <img
+                    src={shamQrUrl || profile?.config?.sham_cash_qr_url}
+                    alt="Sham Cash QR"
+                    className="mx-auto w-40 h-40 rounded-xl object-contain bg-white"
+                  />
+                  <div className="text-xs font-mono" style={{ color: hint }}>
+                    {(shamAccount || profile?.config?.sham_cash_account_number || "").toString()}
+                  </div>
+                </div>
+              )}
             </div>
             <div className="space-y-2">
               {history.length === 0 ? (

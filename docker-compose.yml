@@ -4,6 +4,12 @@ x-app-db: &app-db-env
   DATABASE_URL: postgresql+asyncpg://postgres:${POSTGRES_PASSWORD:-change_me_db_password}@postgres:5432/aggregator_db
   REDIS_URL: redis://redis:6379/0
 
+x-json-logging: &json-logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "3"
+
 services:
   postgres:
     image: postgres:16-alpine
@@ -17,6 +23,7 @@ services:
       - postgres_data:/var/lib/postgresql/data
     # No host ports — internal Docker network only
     mem_limit: 512m
+    logging: *json-logging
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U postgres"]
       interval: 5s
@@ -27,11 +34,13 @@ services:
     image: redis:7-alpine
     container_name: jit_redis
     restart: always
-    command: ["redis-server", "--appendonly", "yes", "--maxmemory", "128mb", "--maxmemory-policy", "allkeys-lru"]
+    # noeviction — never drop locks / TxDeduper / ARQ keys under memory pressure
+    command: ["redis-server", "--appendonly", "yes", "--maxmemory", "192mb", "--maxmemory-policy", "noeviction"]
     volumes:
       - redis_data:/data
     # No host ports — internal Docker network only
-    mem_limit: 192m
+    mem_limit: 256m
+    logging: *json-logging
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 5s
@@ -51,10 +60,9 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
-    # Bound only for local debug; production traffic goes via nginx:80
-    ports:
-      - "8000:8000"
+    # No host ports — reach via nginx/Caddy on :80 only (Docker network: backend:8000)
     mem_limit: 512m
+    logging: *json-logging
 
   bot:
     build: .
@@ -70,6 +78,7 @@ services:
       redis:
         condition: service_healthy
     mem_limit: 256m
+    logging: *json-logging
 
   admin-bot:
     build: .
@@ -85,6 +94,7 @@ services:
       redis:
         condition: service_healthy
     mem_limit: 256m
+    logging: *json-logging
 
   worker-jit:
     build: .
@@ -98,6 +108,7 @@ services:
       backend:
         condition: service_started
     mem_limit: 384m
+    logging: *json-logging
 
   worker-bsc:
     build: .
@@ -111,6 +122,7 @@ services:
       backend:
         condition: service_started
     mem_limit: 192m
+    logging: *json-logging
 
   worker-tron:
     build: .
@@ -124,6 +136,7 @@ services:
       backend:
         condition: service_started
     mem_limit: 192m
+    logging: *json-logging
 
   worker-binance-pay:
     build: .
@@ -137,6 +150,7 @@ services:
       backend:
         condition: service_started
     mem_limit: 192m
+    logging: *json-logging
 
   worker-health:
     build: .
@@ -150,6 +164,7 @@ services:
       backend:
         condition: service_started
     mem_limit: 192m
+    logging: *json-logging
 
   worker-channel:
     build: .
@@ -163,6 +178,7 @@ services:
       backend:
         condition: service_started
     mem_limit: 192m
+    logging: *json-logging
 
   dashboard:
     build:
@@ -172,14 +188,14 @@ services:
         BACKEND_INTERNAL_URL: http://backend:8000
     container_name: jit_admin_dashboard
     restart: always
-    ports:
-      - "3000:3000"
+    # No host ports — reach via nginx/Caddy on :80 only (Docker network: dashboard:3000)
     environment:
       BACKEND_INTERNAL_URL: http://backend:8000
     depends_on:
       backend:
         condition: service_started
     mem_limit: 384m
+    logging: *json-logging
 
   nginx:
     image: nginx:alpine
@@ -193,8 +209,11 @@ services:
       - backend
       - dashboard
     mem_limit: 64m
+    logging: *json-logging
 
+  # Optional — start with: docker compose --profile extras up -d
   worker-radar:
+    profiles: ["extras"]
     build: .
     container_name: jit_worker_competitor_radar
     restart: always
@@ -206,6 +225,7 @@ services:
       backend:
         condition: service_started
     mem_limit: 256m
+    logging: *json-logging
 
   # Optional BI — start with: docker compose --profile bi up -d
   metabase:
@@ -214,16 +234,17 @@ services:
     container_name: jit_metabase
     restart: unless-stopped
     ports:
-      - "3001:3000"
+      - "127.0.0.1:3001:3000"
     environment:
       MB_DB_FILE: /metabase-data/metabase.db
-      MB_ENCRYPTION_SECRET_KEY: "phase17_bi_change_me_in_prod_32chars"
+      MB_ENCRYPTION_SECRET_KEY: ${MB_ENCRYPTION_SECRET_KEY:-change_me_metabase_encryption_32chars}
     volumes:
       - metabase_data:/metabase-data
     depends_on:
       postgres:
         condition: service_healthy
     mem_limit: 768m
+    logging: *json-logging
 
 volumes:
   postgres_data:

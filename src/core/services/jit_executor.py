@@ -114,23 +114,43 @@ class JitExecutor:
             if mode == "local_only":
                 if await _try_local():
                     return
-                await self._handle_supplier_exhausted(
-                    session, order, "Local stock exhausted (local_only mode)."
+                # No auto-refund — queue for human delivery
+                await self._route_to_manual_delivery(
+                    session, order, reason="Local stock exhausted (local_only mode)."
                 )
                 return
             if mode == "local_first":
                 if await _try_local():
                     return
+            if mode == "manual":
+                if await _try_local():
+                    return
+                await self._route_to_manual_delivery(
+                    session, order, reason="Product fulfillment_mode=manual"
+                )
+                return
             if not order.supplier_id:
                 if await _try_local():
                     return
+                await self._route_to_manual_delivery(
+                    session, order, reason="No remote supplier linked"
+                )
+                return
         except Exception as e:
             logger.warning(f"Local stock check failed for {order.order_number}: {e}")
 
         supplier = order.supplier
         if not supplier:
             logger.error(f"Order {order.order_number} has no assigned supplier.")
-            await self._handle_supplier_exhausted(session, order, "No supplier assigned.")
+            await self._route_to_manual_delivery(session, order, reason="No supplier assigned.")
+            return
+
+        # Safe hybrid: no outbound private keys → queue for manual delivery (keep api_first code path)
+        if mode == "api_first" and self._outbound_keys_missing(supplier):
+            await self._route_to_manual_delivery(
+                session, order,
+                reason="Hot-wallet private keys unset; outbound JIT funding disabled",
+            )
             return
 
         adapter = AdapterRegistry.create_from_supplier(supplier)
@@ -756,6 +776,92 @@ class JitExecutor:
         )
 
 
+    @staticmethod
+    def _outbound_keys_missing(supplier: Supplier) -> bool:
+        """True when this supplier would need a hot-wallet key that is intentionally unset."""
+        if supplier.payment_network == PaymentNetwork.USDT_BEP20:
+            pk = (settings.HOT_WALLET_PRIVATE_KEY or "").strip().lower()
+            return not pk or pk in ("0x" + ("0" * 64), "0" * 64) or set(pk.replace("0x", "")) <= {"0"}
+        if supplier.payment_network == PaymentNetwork.USDT_TRC20:
+            pk = (settings.TRON_HOT_WALLET_PRIVATE_KEY or "").strip()
+            return not pk
+        return False
+
+    async def _route_to_manual_delivery(self, session, order: Order, *, reason: str) -> None:
+        """
+        Queue order for human fulfillment — NEVER auto-refund.
+        Sends live customer countdown card + T+0 Admin/Assistant alert with adm:manual:.
+        """
+        from src.core.services.manual_delivery_status import (
+            deadline_from_now,
+            format_countdown_message,
+            get_manual_sla_minutes,
+        )
+
+        order.failure_reason = reason
+        sla_min = await get_manual_sla_minutes(session)
+        now = datetime.now(timezone.utc)
+        order.manual_deadline_at = deadline_from_now(sla_min, now)
+        order.status_countdown_closed = False
+        order.status_overdue_notified = False
+        if order.customer and order.customer.telegram_id:
+            order.status_chat_id = int(order.customer.telegram_id)
+
+        await order_service.transition_order_state(
+            session, order, OrderState.PENDING_MANUAL_DELIVERY,
+            f"pending_manual_delivery: {reason}",
+        )
+        await session.commit()
+
+        lang = "ar"
+        if order.customer and order.customer.language_code:
+            lang = str(order.customer.language_code).lower()
+
+        cust_text = format_countdown_message(
+            order_number=order.order_number,
+            lang=lang,
+            deadline=order.manual_deadline_at,
+            sla_minutes=sla_min,
+            now=now,
+        )
+
+        if order.customer and order.customer.telegram_id:
+            await event_bus.publish("bot:manual_status", {
+                "order_id": str(order.id),
+                "telegram_id": order.customer.telegram_id,
+                "text": cust_text,
+            })
+
+        product_title = (
+            order.master_product.title_ar if order.master_product else "—"
+        )
+        caption = (
+            f"📦 **تسليم يدوي** — طلب جديد\n\n"
+            f"🔖 `{order.order_number}`\n"
+            f"📦 {product_title}\n"
+            f"💵 ${float(order.our_price or 0):.2f}\n"
+            f"📝 {reason}\n"
+            f"⏱️ SLA: {sla_min} دقيقة\n\n"
+            f"اضغط **تسليم يدوي** ثم أرسل الحساب/المفتاح:"
+        )
+        await event_bus.publish("admin:manual_review", {
+            "order_id": str(order.id),
+            "order_number": order.order_number,
+            "caption": caption,
+            "review_kind": "manual_delivery",
+            "amount": float(order.our_price or 0),
+            "product_title": product_title,
+            "disable_notification": False,
+            "escalation_stage": "immediate",
+        })
+        await event_bus.publish_alert(
+            title="Pending Manual Delivery",
+            message=f"Order {order.order_number} queued for manual fulfillment. {reason}",
+            level="warning",
+            meta={"order_id": str(order.id), "state": "pending_manual_delivery"},
+        )
+        logger.info(f"Order {order.order_number} → PENDING_MANUAL_DELIVERY ({reason})")
+
     async def _handle_supplier_exhausted(self, session, order: Order, reason: str):
         """Auto-refunds customer wallet balance and triggers admin alerts."""
         order.failure_reason = reason
@@ -811,6 +917,20 @@ class JitExecutor:
             from src.core.models.entities import FormalInvoice
             fi_stmt = select(FormalInvoice.invoice_number).where(FormalInvoice.order_id == order.id)
             formal_inv_number = (await session.execute(fi_stmt)).scalar_one_or_none()
+
+        # Close live preparation countdown if one was posted
+        if order.status_message_id and order.status_chat_id and not order.status_countdown_closed:
+            lang = "ar"
+            if order.customer and order.customer.language_code:
+                lang = str(order.customer.language_code).lower()
+            from src.core.services.manual_delivery_status import format_terminal_message
+            await event_bus.publish("bot:edit_message", {
+                "order_id": str(order.id),
+                "chat_id": order.status_chat_id,
+                "message_id": order.status_message_id,
+                "text": format_terminal_message(lang=lang, delivered=True),
+                "finalize": True,
+            })
 
         await event_bus.publish(
             "bot:deliver_product",

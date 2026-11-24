@@ -32,9 +32,11 @@ class SupplierHealthMonitor:
                 self._loop_count += 1
                 await self.check_all_suppliers()
                 await self.send_abandoned_checkout_reminders()
-                # ~ every 60s (every other 30s tick): expire unpaid invoices / refund holds
+                # ~ every 60s (every other 30s tick): expire unpaid + live countdown + escalations
                 if self._loop_count % 2 == 0:
                     await self.sweep_expired_orders()
+                    await self.update_manual_delivery_countdowns()
+                    await self.check_manual_delivery_escalations()
                 # ~ every 1h (120 * 30s): renewal reminders
                 if self._loop_count % 120 == 0:
                     await self.send_subscription_renewal_reminders()
@@ -171,6 +173,229 @@ class SupplierHealthMonitor:
                     logger.info(f"Order expiry sweeper: expired {n} unpaid order(s)")
         except Exception as e:
             logger.error(f"Order expiry sweeper failed: {e}")
+
+    async def update_manual_delivery_countdowns(self):
+        """Every ~60s: edit customer live countdown cards; finalize on deliver/cancel."""
+        from src.core.services.manual_delivery_status import (
+            format_countdown_message,
+            format_terminal_message,
+            get_manual_sla_minutes,
+            remaining_seconds,
+        )
+        try:
+            async with AsyncSessionLocal() as session:
+                sla_min = await get_manual_sla_minutes(session)
+                now = datetime.now(timezone.utc)
+                # Active pending with a status message
+                pending = (
+                    await session.execute(
+                        select(Order)
+                        .where(
+                            Order.state == OrderState.PENDING_MANUAL_DELIVERY,
+                            Order.status_message_id.is_not(None),
+                            Order.status_countdown_closed.is_(False),
+                        )
+                        .options(selectinload(Order.customer))
+                        .limit(80)
+                    )
+                ).scalars().all()
+                for order in pending:
+                    chat_id = order.status_chat_id or (
+                        order.customer.telegram_id if order.customer else None
+                    )
+                    if not chat_id or not order.status_message_id:
+                        continue
+                    lang = "ar"
+                    if order.customer and order.customer.language_code:
+                        lang = str(order.customer.language_code).lower()
+                    deadline = order.manual_deadline_at or (
+                        (order.updated_at or now) + timedelta(minutes=sla_min)
+                    )
+                    rem = remaining_seconds(deadline, now)
+                    if rem <= 0:
+                        if order.status_overdue_notified:
+                            continue
+                        text = format_countdown_message(
+                            order_number=order.order_number,
+                            lang=lang,
+                            deadline=deadline,
+                            sla_minutes=sla_min,
+                            now=now,
+                            overdue=True,
+                        )
+                        order.status_overdue_notified = True
+                        await event_bus.publish("bot:edit_message", {
+                            "order_id": str(order.id),
+                            "chat_id": int(chat_id),
+                            "message_id": int(order.status_message_id),
+                            "text": text,
+                            "finalize": False,
+                        })
+                    else:
+                        text = format_countdown_message(
+                            order_number=order.order_number,
+                            lang=lang,
+                            deadline=deadline,
+                            sla_minutes=sla_min,
+                            now=now,
+                        )
+                        await event_bus.publish("bot:edit_message", {
+                            "order_id": str(order.id),
+                            "chat_id": int(chat_id),
+                            "message_id": int(order.status_message_id),
+                            "text": text,
+                            "finalize": False,
+                        })
+
+                # Terminal states still holding an open countdown card
+                terminal_states = (
+                    OrderState.DELIVERED,
+                    OrderState.COMPLETED,
+                    OrderState.ORDER_FULFILLED,
+                    OrderState.CANCELLED,
+                    OrderState.REJECTED,
+                    OrderState.FAILED_REFUNDED,
+                )
+                closed = (
+                    await session.execute(
+                        select(Order)
+                        .where(
+                            Order.state.in_(terminal_states),
+                            Order.status_message_id.is_not(None),
+                            Order.status_countdown_closed.is_(False),
+                        )
+                        .options(selectinload(Order.customer))
+                        .limit(40)
+                    )
+                ).scalars().all()
+                for order in closed:
+                    chat_id = order.status_chat_id or (
+                        order.customer.telegram_id if order.customer else None
+                    )
+                    if not chat_id or not order.status_message_id:
+                        order.status_countdown_closed = True
+                        continue
+                    lang = "ar"
+                    if order.customer and order.customer.language_code:
+                        lang = str(order.customer.language_code).lower()
+                    delivered = order.state in (
+                        OrderState.DELIVERED,
+                        OrderState.COMPLETED,
+                        OrderState.ORDER_FULFILLED,
+                    )
+                    await event_bus.publish("bot:edit_message", {
+                        "order_id": str(order.id),
+                        "chat_id": int(chat_id),
+                        "message_id": int(order.status_message_id),
+                        "text": format_terminal_message(lang=lang, delivered=delivered),
+                        "finalize": True,
+                    })
+                    order.status_countdown_closed = True
+
+                await session.commit()
+        except Exception as e:
+            logger.error(f"Manual delivery countdown update failed: {e}")
+
+    async def check_manual_delivery_escalations(self):
+        """
+        Escalating Admin/Assistant Telegram pings for PENDING_MANUAL_DELIVERY:
+          T+30 half reminder · T+50 / T+60+ urgent every 10 minutes.
+        T+0 is sent immediately from jit_executor._route_to_manual_delivery.
+        """
+        from src.core.services.manual_delivery_status import (
+            escalation_stage,
+            format_escalation_caption,
+            get_manual_sla_minutes,
+        )
+        try:
+            async with AsyncSessionLocal() as session:
+                sla_min = await get_manual_sla_minutes(session)
+                now = datetime.now(timezone.utc)
+                rows = (
+                    await session.execute(
+                        select(Order)
+                        .where(Order.state == OrderState.PENDING_MANUAL_DELIVERY)
+                        .options(selectinload(Order.master_product), selectinload(Order.customer))
+                        .limit(40)
+                    )
+                ).scalars().all()
+                if not rows:
+                    return
+                redis = event_bus._redis
+                for order in rows:
+                    started = order.updated_at or order.created_at or now
+                    if started.tzinfo is None:
+                        started = started.replace(tzinfo=timezone.utc)
+                    # Prefer deadline-derived start when available
+                    if order.manual_deadline_at:
+                        dl = order.manual_deadline_at
+                        if dl.tzinfo is None:
+                            dl = dl.replace(tzinfo=timezone.utc)
+                        started = dl - timedelta(minutes=sla_min)
+                    elapsed_min = (now - started).total_seconds() / 60.0
+                    stage = escalation_stage(elapsed_min)
+                    if not stage:
+                        continue
+
+                    title = order.master_product.title_ar if order.master_product else "—"
+                    if stage == "half":
+                        throttle_key = f"esc:manual:{order.id}:half"
+                        ttl = 3600 * 6
+                        if redis is not None:
+                            try:
+                                if await redis.get(throttle_key):
+                                    continue
+                                await redis.set(throttle_key, "1", ex=ttl)
+                            except Exception:
+                                pass
+                        caption = format_escalation_caption(
+                            stage="half",
+                            order_number=order.order_number,
+                            product_title=title,
+                            elapsed_minutes=int(elapsed_min),
+                        )
+                    else:
+                        # Urgent: first at 50m, then every 10 minutes
+                        throttle_key = f"esc:manual:{order.id}:urgent"
+                        if redis is not None:
+                            try:
+                                if await redis.get(throttle_key):
+                                    continue
+                                await redis.set(throttle_key, "1", ex=600)
+                            except Exception:
+                                pass
+                        caption = format_escalation_caption(
+                            stage="urgent",
+                            order_number=order.order_number,
+                            product_title=title,
+                            elapsed_minutes=int(elapsed_min),
+                        )
+
+                    await event_bus.publish("admin:manual_review", {
+                        "order_id": str(order.id),
+                        "order_number": order.order_number,
+                        "review_kind": "manual_delivery",
+                        "caption": caption,
+                        "disable_notification": False,
+                        "escalation_stage": stage,
+                    })
+                    await event_bus.publish_alert(
+                        title="Manual Delivery Escalation",
+                        message=caption,
+                        level="danger" if stage == "urgent" else "warning",
+                        meta={
+                            "order_id": str(order.id),
+                            "alert_type": "manual_delivery_escalation",
+                            "stage": stage,
+                        },
+                    )
+                logger.debug(f"Manual delivery escalation pass: scanned {len(rows)} order(s)")
+        except Exception as e:
+            logger.error(f"Manual delivery escalation check failed: {e}")
+
+    # Back-compat alias used by older tests / callers
+    async def check_manual_delivery_sla(self):
+        await self.check_manual_delivery_escalations()
 
     async def send_abandoned_checkout_reminders(self):
         """ONE Arabic reminder at CHECKOUT_REMINDER_MINUTES with pay/cancel buttons."""

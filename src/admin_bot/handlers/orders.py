@@ -268,11 +268,17 @@ async def cb_sham_approve(callback: CallbackQuery):
                 admin_user_id=None,
                 trigger_jit=True,
             )
+        from src.admin_bot.keyboards.main_menu import post_fulfillment_keyboard
+        from src.core.services.proof_service import publish_to_proof_channel
+        try:
+            await publish_to_proof_channel(order_id, stage="paid", force=False)
+        except Exception as pe:
+            logger.warning(f"Auto proof publish after sham approve failed: {pe}")
         await callback.message.edit_text(
             f"⚡ **قبول وشراء آلي بالـ API**\n\n"
             f"الطلب `{result['order_number']}` → تأكيد الدفع وتشغيل التوريد الآلي.",
             parse_mode="Markdown",
-            reply_markup=coming_soon_keyboard(),
+            reply_markup=post_fulfillment_keyboard(order_id),
         )
         await callback.answer("تم القبول وبدء التوريد", show_alert=False)
     except ValueError as e:
@@ -309,14 +315,47 @@ async def msg_manual_payload(message: Message, state: FSMContext):
                 reviewer=reviewer,
             )
         await state.clear()
+        from src.admin_bot.keyboards.main_menu import post_fulfillment_keyboard
+        from src.core.services.proof_service import publish_to_proof_channel
+        try:
+            await publish_to_proof_channel(order_id, stage="delivered", force=False)
+        except Exception as pe:
+            logger.warning(f"Auto proof publish after manual deliver failed: {pe}")
         await message.answer(
             f"✅ **تم التسليم اليدوي**\nالطلب `{result['order_number']}`",
             parse_mode="Markdown",
-            reply_markup=orders_hub_keyboard(),
+            reply_markup=post_fulfillment_keyboard(str(order_id)),
         )
     except Exception as e:
         await state.clear()
         await message.answer(f"فشل التسليم: {e}")
+
+
+@router.callback_query(F.data.startswith("adm:proof:"))
+async def cb_publish_proof(callback: CallbackQuery):
+    """1-click publish to قناة التوثيق (idempotent)."""
+    order_id = callback.data.split(":", 2)[-1]
+    from src.core.services.proof_service import publish_to_proof_channel
+    try:
+        result = await publish_to_proof_channel(order_id, stage="delivered", force=True)
+        if result.get("status") == "ok":
+            await callback.answer("تم النشر في قناة التوثيق ✅", show_alert=True)
+            try:
+                await callback.message.answer(
+                    f"📢 نُشر توثيق الطلب `{result.get('order_number')}` في قناة التوثيق.",
+                    parse_mode="Markdown",
+                )
+            except Exception:
+                pass
+        elif result.get("reason") == "already_posted":
+            await callback.answer("تم نشر هذا الطلب مسبقاً (لا تكرار).", show_alert=True)
+        elif result.get("reason") == "proof_channel_not_configured":
+            await callback.answer("قناة التوثيق غير مهيأة — اضبط proof_channel_id", show_alert=True)
+        else:
+            await callback.answer(f"تعذر النشر: {result.get('reason')}", show_alert=True)
+    except Exception as e:
+        logger.exception(f"adm:proof failed: {e}")
+        await callback.answer("فشل النشر — راجع السجلات", show_alert=True)
 
 
 @router.callback_query(F.data.startswith("adm_sc_no:"))

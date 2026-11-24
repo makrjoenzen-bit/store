@@ -28,6 +28,8 @@ async def listen_bot_events(bot: Bot):
         "bot:notify_referral_commission",
         "bot:ticket_reply",
         "bot:send_message",
+        "bot:manual_status",
+        "bot:edit_message",
         "bot:checkout_reminder",
         "bot:stock_alert",
         "bot:renewal_reminder",
@@ -113,6 +115,69 @@ async def listen_bot_events(bot: Bot):
                             )
                         except Exception as e:
                             logger.error(f"Failed to send bot message to {tg_id}: {e}")
+
+                elif channel == "bot:manual_status":
+                    tg_id = data.get("telegram_id")
+                    msg_text = data.get("text")
+                    order_id = data.get("order_id")
+                    if tg_id and msg_text:
+                        try:
+                            from src.bot.effects import send_with_effect
+                            sent = await send_with_effect(
+                                bot,
+                                chat_id=tg_id,
+                                text=msg_text,
+                                parse_mode=ParseMode.HTML,
+                            )
+                            if sent and order_id and getattr(sent, "message_id", None):
+                                from src.core.database import AsyncSessionLocal
+                                from src.core.models.entities import Order
+                                import uuid as _uuid
+                                async with AsyncSessionLocal() as session:
+                                    order = await session.get(Order, _uuid.UUID(str(order_id)))
+                                    if order:
+                                        order.status_message_id = int(sent.message_id)
+                                        order.status_chat_id = int(tg_id)
+                                        await session.commit()
+                        except Exception as e:
+                            logger.error(f"Failed manual status card to {tg_id}: {e}")
+
+                elif channel == "bot:edit_message":
+                    chat_id = data.get("chat_id")
+                    message_id = data.get("message_id")
+                    msg_text = data.get("text")
+                    order_id = data.get("order_id")
+                    finalize = bool(data.get("finalize"))
+                    if chat_id and message_id and msg_text:
+                        try:
+                            await bot.edit_message_text(
+                                chat_id=int(chat_id),
+                                message_id=int(message_id),
+                                text=msg_text,
+                                parse_mode=ParseMode.HTML,
+                            )
+                        except Exception as e:
+                            err = str(e).lower()
+                            if "message is not modified" in err or "not modified" in err:
+                                pass
+                            elif "retry after" in err or "flood" in err:
+                                logger.warning(f"edit_message FloodWait: {e}")
+                            elif "blocked" in err or "forbidden" in err or "chat not found" in err:
+                                logger.info(f"edit_message skipped (user unreachable): {e}")
+                            else:
+                                logger.warning(f"edit_message failed: {e}")
+                        if finalize and order_id:
+                            try:
+                                from src.core.database import AsyncSessionLocal
+                                from src.core.models.entities import Order
+                                import uuid as _uuid
+                                async with AsyncSessionLocal() as session:
+                                    order = await session.get(Order, _uuid.UUID(str(order_id)))
+                                    if order:
+                                        order.status_countdown_closed = True
+                                        await session.commit()
+                            except Exception as e:
+                                logger.debug(f"status finalize flag failed: {e}")
 
                 elif channel == "bot:stock_alert":
                     tg_id = data.get("telegram_id")

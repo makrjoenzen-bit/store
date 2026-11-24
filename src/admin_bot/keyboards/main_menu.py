@@ -62,6 +62,46 @@ def sham_cash_claim_keyboard(order_id: str) -> InlineKeyboardMarkup:
     )
 
 
+def manual_delivery_keyboard(order_id: str) -> InlineKeyboardMarkup:
+    """Direct paste-credentials path for PENDING_MANUAL_DELIVERY queue."""
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(
+                text="✍️ تسليم يدوي",
+                callback_data=f"adm:manual:{order_id}",
+            )],
+            [InlineKeyboardButton(
+                text="📢 نشر في قناة التوثيق",
+                callback_data=f"adm:proof:{order_id}",
+            )],
+        ]
+    )
+
+
+def proof_publish_keyboard(order_id: str) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(
+                text="📢 نشر في قناة التوثيق",
+                callback_data=f"adm:proof:{order_id}",
+            )],
+        ]
+    )
+
+
+def post_fulfillment_keyboard(order_id: str) -> InlineKeyboardMarkup:
+    """After approve / manual deliver — always offer 1-click proof publish."""
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(
+                text="📢 نشر في قناة التوثيق",
+                callback_data=f"adm:proof:{order_id}",
+            )],
+            [InlineKeyboardButton(text="🧾 الطلبات", callback_data="adm:orders")],
+        ]
+    )
+
+
 def sham_cash_review_keyboard(
     order_id: str,
     *,

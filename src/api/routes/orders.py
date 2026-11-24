@@ -158,6 +158,56 @@ async def get_order_details(
     }
 
 
+class ManualDeliverDTO(BaseModel):
+    payload: str
+
+
+@router.post("/{order_id}/manual-deliver")
+async def manual_deliver_order(
+    order_id: str,
+    dto: ManualDeliverDTO,
+    session: AsyncSession = Depends(get_db),
+    admin: AdminUser = Depends(get_current_admin),
+):
+    """Paste credentials for PENDING_MANUAL_DELIVERY / FAILED_MANUAL_REVIEW / Sham review."""
+    payload = (dto.payload or "").strip()
+    if not payload:
+        raise HTTPException(status_code=400, detail="payload is required")
+    try:
+        result = await sham_cash_service.approve_manual_delivery(
+            session,
+            order_id,
+            delivered_payload=payload,
+            reviewer=f"dashboard:{admin.username}",
+            admin_user_id=admin.id,
+        )
+        try:
+            from src.core.services.proof_service import publish_to_proof_channel
+            proof = await publish_to_proof_channel(order_id, stage="delivered", force=False)
+            result = {**result, "proof": proof}
+        except Exception:
+            pass
+        return result
+    except ValueError as e:
+        raise HTTPException(status_code=409, detail=str(e))
+
+
+@router.post("/{order_id}/publish-proof")
+async def publish_order_proof(
+    order_id: str,
+    session: AsyncSession = Depends(get_db),
+    admin: AdminUser = Depends(get_current_admin),
+):
+    """1-click publish masked trust card to قناة التوثيق."""
+    from src.core.services.proof_service import publish_to_proof_channel
+    result = await publish_to_proof_channel(order_id, stage="delivered", force=True, session=session)
+    if result.get("status") == "error" and result.get("reason") == "order_not_found":
+        raise HTTPException(status_code=404, detail="Order not found")
+    if result.get("status") == "error" and result.get("reason") == "proof_channel_not_configured":
+        raise HTTPException(status_code=503, detail="proof_channel_id not configured")
+    return result
+
+
 # ---------------- Retry JIT + 1-Click Refund ----------------
 @router.post("/{order_id}/retry-jit")
 async def retry_jit_order(
@@ -249,13 +299,20 @@ async def approve_sham_cash_payment(
 ):
     """Admin confirms Sham Cash receipt -> triggers automated JIT executor immediately."""
     try:
-        return await sham_cash_service.approve(
+        result = await sham_cash_service.approve(
             session,
             order_id=order_id,
             reviewer=admin.username,
             admin_user_id=admin.id,
             trigger_jit=True,
         )
+        try:
+            from src.core.services.proof_service import publish_to_proof_channel
+            proof = await publish_to_proof_channel(order_id, stage="paid", force=False)
+            result = {**result, "proof": proof}
+        except Exception:
+            pass
+        return result
     except ValueError as e:
         raise HTTPException(status_code=404, detail=str(e))
 

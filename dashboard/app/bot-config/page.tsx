@@ -12,7 +12,10 @@ interface BotConfigState {
   welcome_message_ar: string;
   welcome_message_en: string;
   sham_cash_account_number: string;
+  sham_cash_qr_url: string;
+  sham_cash_recipient_name: string;
   sham_cash_instructions_ar: string;
+  proof_channel_auto_post: boolean;
   sham_cash_usd_to_syp_rate: number;
   sham_cash_accept_syp: boolean;
   cashback_percent: number;
@@ -28,6 +31,8 @@ interface BotConfigState {
   pay_sham_cash_enabled: boolean;
   pay_usdt_enabled: boolean;
   pay_binance_enabled: boolean;
+  escalation_telegram_ids: string;
+  manual_delivery_sla_minutes: number;
 }
 
 export default function BotConfigPage() {
@@ -35,7 +40,10 @@ export default function BotConfigPage() {
     welcome_message_ar: "أهلاً بك في المتجر الرقمي الآلي! 🌟\nنوفر لك أفضل أسعار اشتراكات الذكاء الاصطناعي مع تسليم فوري.",
     welcome_message_en: "Welcome to the instant digital shop!",
     sham_cash_account_number: "0991234567",
+    sham_cash_qr_url: "",
+    sham_cash_recipient_name: "",
     sham_cash_instructions_ar: "قم بالتحويل عبر شام كاش للحساب: 0912345678\nثم أرسل صورة إشعار التحويل هنا للمراجعة الفورية.",
+    proof_channel_auto_post: false,
     sham_cash_usd_to_syp_rate: 11500,
     sham_cash_accept_syp: true,
     cashback_percent: 2,
@@ -51,6 +59,8 @@ export default function BotConfigPage() {
     pay_sham_cash_enabled: true,
     pay_usdt_enabled: true,
     pay_binance_enabled: true,
+    escalation_telegram_ids: "",
+    manual_delivery_sla_minutes: 60,
   });
 
   const [saved, setSaved] = useState(false);
@@ -69,7 +79,10 @@ export default function BotConfigPage() {
             welcome_message_ar: data.welcome_message_ar || "أهلاً بك في المتجر الرقمي الآلي! 🌟\nنوفر لك أفضل أسعار اشتراكات الذكاء الاصطناعي مع تسليم فوري.",
             welcome_message_en: data.welcome_message_en || "Welcome to the instant digital shop!",
             sham_cash_account_number: data.sham_cash_account_number || "0991234567",
+            sham_cash_qr_url: data.sham_cash_qr_url || "",
+            sham_cash_recipient_name: data.sham_cash_recipient_name || "",
             sham_cash_instructions_ar: data.sham_cash_instructions_ar || "قم بالتحويل عبر شام كاش للحساب: 0912345678\nثم أرسل صورة إشعار التحويل هنا للمراجعة الفورية.",
+            proof_channel_auto_post: truthy(data.proof_channel_auto_post, false),
             sham_cash_usd_to_syp_rate: Number(data.sham_cash_usd_to_syp_rate ?? 11500),
             sham_cash_accept_syp: data.sham_cash_accept_syp !== false && data.sham_cash_accept_syp !== "false",
             cashback_percent: Number(data.cashback_percent ?? 2),
@@ -85,6 +98,8 @@ export default function BotConfigPage() {
             pay_sham_cash_enabled: data.pay_sham_cash_enabled !== false && data.pay_sham_cash_enabled !== "false",
             pay_usdt_enabled: data.pay_usdt_enabled !== false && data.pay_usdt_enabled !== "false",
             pay_binance_enabled: data.pay_binance_enabled !== false && data.pay_binance_enabled !== "false",
+            escalation_telegram_ids: data.escalation_telegram_ids || "",
+            manual_delivery_sla_minutes: Number(data.manual_delivery_sla_minutes ?? 60),
           });
         }
       } catch (e) {
@@ -182,6 +197,45 @@ export default function BotConfigPage() {
                     className="w-full px-4 py-2.5 rounded-xl bg-obsidian-950 border border-white/[0.08] text-white font-mono focus:outline-none focus:border-indigo-500"
                     placeholder="0991234567"
                   />
+                </div>
+
+                <div>
+                  <label className="block text-slate-300 font-semibold mb-2">
+                    اسم المستلم (تحت الـ QR):
+                  </label>
+                  <input
+                    type="text"
+                    value={configs.sham_cash_recipient_name}
+                    onChange={(e) => setConfigs({ ...configs, sham_cash_recipient_name: e.target.value })}
+                    className="w-full px-4 py-2.5 rounded-xl bg-obsidian-950 border border-white/[0.08] text-white focus:outline-none focus:border-indigo-500"
+                    placeholder="مثال: متجر الاشتراكات"
+                  />
+                </div>
+
+                <div>
+                  <label className="block text-slate-300 font-semibold mb-2">
+                    رابط صورة QR شام كاش (`sham_cash_qr_url`):
+                  </label>
+                  <input
+                    type="text"
+                    value={configs.sham_cash_qr_url}
+                    onChange={(e) => setConfigs({ ...configs, sham_cash_qr_url: e.target.value })}
+                    className="w-full px-4 py-2.5 rounded-xl bg-obsidian-950 border border-white/[0.08] text-white font-mono focus:outline-none focus:border-indigo-500"
+                    placeholder="/uploads/sham_cash/qr.jpg أو https://..."
+                  />
+                  {configs.sham_cash_qr_url ? (
+                    <div className="mt-3 flex items-start gap-3">
+                      {/* eslint-disable-next-line @next/next/no-img-element */}
+                      <img
+                        src={configs.sham_cash_qr_url}
+                        alt="Sham Cash QR"
+                        className="w-28 h-28 rounded-xl border border-white/10 object-contain bg-white"
+                      />
+                      <p className="text-[11px] text-slate-400 leading-relaxed pt-1">
+                        معاينة مباشرة — تُعرض للعميل في البوت وMini App عند اختيار شام كاش.
+                      </p>
+                    </div>
+                  ) : null}
                 </div>
 
                 {/* Sham Cash Instructions */}
@@ -345,6 +399,51 @@ export default function BotConfigPage() {
               </div>
             </div>
 
+            {/* Manual delivery escalation */}
+            <div className="p-6 rounded-3xl glass-panel border border-white/[0.08] space-y-5">
+              <div className="flex items-center justify-between border-b border-white/[0.06] pb-3">
+                <div className="flex items-center gap-2">
+                  <div className="w-7 h-7 rounded-lg bg-rose-500/10 border border-rose-500/20 flex items-center justify-center text-rose-400">
+                    <Bell className="w-4 h-4" />
+                  </div>
+                  <div>
+                    <h3 className="text-sm font-bold text-white">تنبيهات التسليم اليدوي والتصعيد</h3>
+                    <p className="text-[11px] text-slate-400">Multi-Admin Escalation (Telegram-only)</p>
+                  </div>
+                </div>
+              </div>
+              <p className="text-xs text-slate-300 leading-relaxed">
+                أضف معرفات تيليجرام للمسؤول والمساعد (مفصولة بفاصلة). يستلمون تنبيه فوري عند الدفع، ثم تذكير عند 30 دقيقة، وتصعيد عاجل كل 10 دقائق بعد 50 دقيقة حتى التسليم.
+              </p>
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-4 text-xs">
+                <div>
+                  <label className="block text-slate-300 font-semibold mb-1.5">
+                    escalation_telegram_ids
+                  </label>
+                  <input
+                    type="text"
+                    value={configs.escalation_telegram_ids}
+                    onChange={(e) => setConfigs({ ...configs, escalation_telegram_ids: e.target.value })}
+                    placeholder="111001,222003"
+                    className="w-full px-4 py-2.5 rounded-xl bg-obsidian-950 border border-white/[0.08] text-white font-mono focus:outline-none focus:border-rose-500 transition"
+                  />
+                </div>
+                <div>
+                  <label className="block text-slate-300 font-semibold mb-1.5">
+                    مهلة التجهيز (دقيقة)
+                  </label>
+                  <input
+                    type="number"
+                    min={5}
+                    max={1440}
+                    value={configs.manual_delivery_sla_minutes}
+                    onChange={(e) => setConfigs({ ...configs, manual_delivery_sla_minutes: parseInt(e.target.value, 10) || 60 })}
+                    className="w-full px-4 py-2.5 rounded-xl bg-obsidian-950 border border-white/[0.08] text-white font-mono focus:outline-none focus:border-rose-500 transition"
+                  />
+                </div>
+              </div>
+            </div>
+
             {/* Section 3: Phase 7 Live Social Proof Channel Engine */}
             <div className="p-6 rounded-3xl glass-panel border border-white/[0.08] space-y-5">
               <div className="flex items-center justify-between border-b border-white/[0.06] pb-3">
@@ -358,7 +457,7 @@ export default function BotConfigPage() {
                   </div>
                 </div>
 
-                {/* Toggle Switch */}
+                {/* Toggle Switch — legacy auto_post_proofs_enabled */}
                 <button
                   type="button"
                   onClick={() => setConfigs({ ...configs, auto_post_proofs_enabled: !configs.auto_post_proofs_enabled })}
@@ -373,6 +472,16 @@ export default function BotConfigPage() {
                   />
                 </button>
               </div>
+
+              <label className="flex items-center gap-2 text-xs text-slate-300 cursor-pointer rounded-xl border border-white/[0.08] px-3 py-2 w-fit">
+                <input
+                  type="checkbox"
+                  checked={Boolean(configs.proof_channel_auto_post)}
+                  onChange={(e) => setConfigs({ ...configs, proof_channel_auto_post: e.target.checked })}
+                  className="rounded border-white/20"
+                />
+                نشر تلقائي في قناة التوثيق بعد قبول شام كاش / التسليم اليدوي (`proof_channel_auto_post`)
+              </label>
 
               <p className="text-xs text-slate-300 leading-relaxed">
                 نشر بطاقة إثبات فورية ومقنعة في قناة مخصصة فور اكتمال تسليم أي طلب أو شحن محفظة. يتم تشفير اسم المشتري ورقم الطلب لحماية الخصوصية، مع إرفاق زر شراء مباشر للمنتج لزيادة المبيعات.

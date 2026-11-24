@@ -62,7 +62,7 @@ class BscListenerWorker:
             return
 
         logger.info(f"BSC Payment Listener started. Watching incoming USDT to {self.hot_wallet}...")
-        self.last_scanned_block = await self.w3.eth.block_number - 5
+        self.last_scanned_block = await self._resume_last_scanned_block()
 
         transfer_topic = self.w3.keccak(text="Transfer(address,address,uint256)").hex()
         to_topic = "0x" + self.hot_wallet[2:].lower().zfill(64)
@@ -85,6 +85,7 @@ class BscListenerWorker:
                         await self._process_transfer_log(log)
 
                     self.last_scanned_block = to_block
+                    await self._persist_last_scanned_block(to_block)
 
                 self._fail_streak = 0
                 await asyncio.sleep(3)
@@ -94,6 +95,39 @@ class BscListenerWorker:
                 self._fail_streak += 1
                 logger.error(f"Error in BSC listener loop: {e}")
                 await sleep_backoff(min(self._fail_streak - 1, 6), base=2.0, cap=60.0)
+
+    async def _resume_last_scanned_block(self) -> int:
+        """Resume from Redis cursor; cap lookback if cursor is missing/stale."""
+        latest = await self.w3.eth.block_number
+        safe_lookback = 2000  # ~1.5h on BSC
+        default_start = max(0, latest - 5)
+        try:
+            from src.core.redis import event_bus
+            redis = event_bus.redis or getattr(event_bus, "_redis", None)
+            if redis is not None:
+                raw = await redis.get("bsc:last_scanned_block")
+                if raw is not None:
+                    saved = int(raw)
+                    floor = max(0, latest - safe_lookback)
+                    resumed = max(saved, floor)
+                    if resumed < latest:
+                        logger.info(
+                            f"BSC listener resumed from block {resumed} "
+                            f"(saved={saved}, latest={latest})"
+                        )
+                        return resumed
+        except Exception as e:
+            logger.warning(f"Could not read bsc:last_scanned_block from Redis: {e}")
+        return default_start
+
+    async def _persist_last_scanned_block(self, block: int) -> None:
+        try:
+            from src.core.redis import event_bus
+            redis = event_bus.redis or getattr(event_bus, "_redis", None)
+            if redis is not None:
+                await redis.set("bsc:last_scanned_block", str(int(block)))
+        except Exception as e:
+            logger.warning(f"Could not persist bsc:last_scanned_block: {e}")
 
     async def _process_transfer_log(self, log):
         tx_hash = log["transactionHash"].hex()

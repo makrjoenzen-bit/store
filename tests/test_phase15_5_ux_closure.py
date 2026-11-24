@@ -22,9 +22,9 @@ def test_sham_cash_accepts_pdf_and_photo_handlers():
     assert "F.document" in src
     assert "application/pdf" in src
     assert "publish_manual_review_alert" in src
-    assert "تم استلام إيصالك بنجاح" in src
+    assert "تم استلام إيصال الدفع بنجاح" in src or "تم استلام إيصالك بنجاح" in src
     # Never leak supplier to customer confirmation
-    customer_confirm = "تم استلام إيصالك بنجاح"
+    customer_confirm = "تم استلام إيصال"
     idx = src.find(customer_confirm)
     chunk = src[idx : idx + 400]
     assert "المورد" not in chunk

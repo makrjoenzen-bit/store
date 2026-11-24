@@ -138,9 +138,14 @@ class Settings(BaseSettings):
     CHECKOUT_REMINDER_MINUTES: int = 15
     # Sham Cash without receipt abandoned after this many minutes
     SHAM_CASH_ABANDON_MINUTES: int = 60
+    # Manual fulfillment SLA / customer countdown (minutes in PENDING_MANUAL_DELIVERY)
+    MANUAL_DELIVERY_SLA_MINUTES: int = 60
     VENTEBOT_DEPOSIT_TIMEOUT_SECONDS: int = 300
     # Alert Admin Bot when supplier API balance falls below this USD threshold
     SUPPLIER_BALANCE_ALERT_USD: float = 15.0
+    # SQLAlchemy pool — keep ~10 services well under Postgres max_connections=100
+    DB_POOL_SIZE: int = 5
+    DB_MAX_OVERFLOW: int = 5
 
     # Phase 17 — AI Concierge (OpenAI-compatible: Groq / OpenRouter / etc.)
     AI_CONCIERGE_BASE_URL: str = "https://api.groq.com/openai/v1"

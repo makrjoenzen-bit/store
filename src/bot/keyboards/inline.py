@@ -43,12 +43,28 @@ def binance_payment_keyboard(*, order_id: str, pay_id: str) -> InlineKeyboardMar
     ])
 
 
-def sham_cash_payment_keyboard(*, order_id: str, account_code: str = "") -> InlineKeyboardMarkup:
+def sham_cash_payment_keyboard(
+    *,
+    order_id: str,
+    account_code: str = "",
+    lang: str = "ar",
+) -> InlineKeyboardMarkup:
+    """QR caption keyboard: I Have Paid + Cancel (+ optional copy account)."""
     rows = []
     if account_code:
         rows.append([copy_btn("📋 نسخ رقم/كود شام كاش", account_code)])
-    rows.append([InlineKeyboardButton(text="❌ إلغاء", callback_data=f"cancel_order:{order_id}")])
+    paid_label = "✅ تم الدفع / I Have Paid" if lang != "en" else "✅ I Have Paid"
+    cancel_label = "❌ إلغاء / Cancel" if lang != "en" else "❌ Cancel"
+    rows.append([InlineKeyboardButton(text=paid_label, callback_data=f"sham_paid:{order_id}")])
+    rows.append([InlineKeyboardButton(text=cancel_label, callback_data=f"cancel_order:{order_id}")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def sham_cash_receipt_prompt_keyboard(*, order_id: str, lang: str = "ar") -> InlineKeyboardMarkup:
+    cancel_label = "❌ إلغاء" if lang != "en" else "❌ Cancel"
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text=cancel_label, callback_data=f"cancel_order:{order_id}")],
+    ])
 
 
 def cancel_fsm_keyboard(callback_data: str = "nav:home") -> InlineKeyboardMarkup:

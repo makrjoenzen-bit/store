@@ -15,6 +15,71 @@ export default function OrdersPage() {
   const [selectedOrder, setSelectedOrder] = useState<any>(null);
   const [orderDetails, setOrderDetails] = useState<any>(null);
   const [copiedKey, setCopiedKey] = useState(false);
+  const [manualPayload, setManualPayload] = useState("");
+  const [manualBusy, setManualBusy] = useState(false);
+  const [manualMsg, setManualMsg] = useState<string | null>(null);
+  const [proofBusy, setProofBusy] = useState(false);
+  const [proofMsg, setProofMsg] = useState<string | null>(null);
+
+  const stateLabel = (state: string) => {
+    const map: Record<string, string> = {
+      pending_manual_delivery: "بانتظار تسليم يدوي",
+      failed_manual_review: "مراجعة يدوية فاشلة",
+      awaiting_payment: "بانتظار الدفع",
+      completed: "مكتمل",
+      delivered: "تم التسليم",
+      failed_refunded: "مسترد",
+    };
+    return map[state] || state.replace(/_/g, " ");
+  };
+
+  const publishProof = async (orderId?: string) => {
+    const id = orderId || selectedOrder?.id;
+    if (!id) return;
+    setProofBusy(true);
+    setProofMsg(null);
+    try {
+      const res = await fetch(`/api/orders/${id}/publish-proof`, {
+        method: "POST",
+        credentials: "include",
+      });
+      const body = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(body.detail || `HTTP ${res.status}`);
+      if (body.status === "skipped" && body.reason === "already_posted") {
+        setProofMsg("تم النشر مسبقاً — لا تكرار");
+      } else {
+        setProofMsg("تم النشر في قناة التوثيق ✅");
+      }
+    } catch (e: any) {
+      setProofMsg(e?.message || "فشل النشر");
+    } finally {
+      setProofBusy(false);
+    }
+  };
+
+  const submitManualDeliver = async () => {
+    if (!selectedOrder?.id || !manualPayload.trim()) return;
+    setManualBusy(true);
+    setManualMsg(null);
+    try {
+      const res = await fetch(`/api/orders/${selectedOrder.id}/manual-deliver`, {
+        method: "POST",
+        credentials: "include",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ payload: manualPayload.trim() }),
+      });
+      const body = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(body.detail || `HTTP ${res.status}`);
+      setManualMsg("تم التسليم اليدوي بنجاح");
+      setManualPayload("");
+      await handleOpenOrderDetails(selectedOrder.id);
+      await fetchOrders();
+    } catch (e: any) {
+      setManualMsg(e?.message || "فشل التسليم");
+    } finally {
+      setManualBusy(false);
+    }
+  };
 
   const fetchOrders = async () => {
     try {
@@ -86,6 +151,7 @@ export default function OrdersPage() {
           <div className="flex p-1 rounded-xl bg-white/[0.03] border border-white/[0.08] text-xs font-medium">
             {[
               { id: "all", label: "الكل" },
+              { id: "pending_manual_delivery", label: "تسليم يدوي" },
               { id: "completed", label: "مكتملة" },
               { id: "awaiting_payment", label: "بانتظار الدفع" },
               { id: "failed_refunded", label: "مستردة" },
@@ -132,13 +198,15 @@ export default function OrdersPage() {
                 <td className="px-6 py-4 text-slate-400 font-mono text-[11px]">{o.supplier_name || "—"}</td>
                 <td className="px-6 py-4">
                   <span className={`px-2.5 py-1 rounded-lg text-[10px] font-mono font-bold uppercase tracking-wider ${
-                    o.state === "completed"
+                    o.state === "completed" || o.state === "delivered"
                       ? "bg-emerald-500/10 text-emerald-400 border border-emerald-500/20"
+                      : o.state === "pending_manual_delivery"
+                      ? "bg-amber-500/10 text-amber-300 border border-amber-500/20"
                       : o.state.includes("failed")
                       ? "bg-rose-500/10 text-rose-400 border border-rose-500/20"
                       : "bg-blue-500/10 text-blue-400 border border-blue-500/20"
                   }`}>
-                    {o.state.replace(/_/g, " ")}
+                    {stateLabel(o.state)}
                   </span>
                 </td>
                 <td className="px-6 py-4 font-mono font-bold text-white text-sm">
@@ -214,6 +282,45 @@ export default function OrdersPage() {
                     +${selectedOrder.financials.profit_margin.toFixed(2)}
                   </div>
                 </div>
+              </div>
+
+              {/* Manual delivery for queued / failed-manual orders */}
+              {(selectedOrder.state === "pending_manual_delivery" ||
+                selectedOrder.state === "failed_manual_review") && (
+                <div className="space-y-2 p-4 rounded-2xl border border-amber-500/25 bg-amber-500/5">
+                  <div className="text-xs font-semibold text-amber-200">تسليم يدوي</div>
+                  <textarea
+                    value={manualPayload}
+                    onChange={(e) => setManualPayload(e.target.value)}
+                    rows={4}
+                    placeholder="الصق الحساب / المفتاح هنا…"
+                    className="w-full rounded-xl bg-obsidian-950 border border-white/[0.08] text-xs text-white p-3 focus:outline-none focus:border-amber-500"
+                  />
+                  <button
+                    type="button"
+                    disabled={manualBusy || !manualPayload.trim()}
+                    onClick={submitManualDeliver}
+                    className="w-full py-2.5 rounded-xl bg-amber-600 hover:bg-amber-500 disabled:opacity-50 text-white text-xs font-bold"
+                  >
+                    {manualBusy ? "جارٍ التسليم…" : "تسليم يدوي"}
+                  </button>
+                  {manualMsg && (
+                    <p className="text-[11px] text-slate-300">{manualMsg}</p>
+                  )}
+                </div>
+              )}
+
+              <div className="space-y-2 p-4 rounded-2xl border border-sky-500/20 bg-sky-500/5">
+                <div className="text-xs font-semibold text-sky-200">قناة التوثيق</div>
+                <button
+                  type="button"
+                  disabled={proofBusy}
+                  onClick={() => publishProof(selectedOrder.id)}
+                  className="w-full py-2.5 rounded-xl bg-sky-600 hover:bg-sky-500 disabled:opacity-50 text-white text-xs font-bold"
+                >
+                  {proofBusy ? "جارٍ النشر…" : "📢 نشر في قناة التوثيق"}
+                </button>
+                {proofMsg && <p className="text-[11px] text-slate-300">{proofMsg}</p>}
               </div>
 
               {/* Delivered Payload / License Key */}

@@ -27,6 +27,7 @@ STAFF_ALLOWED_CB_PREFIXES = (
     "adm:claim:",
     "adm:unclaim:",
     "adm:manual:",
+    "adm:proof:",
     "adm:warranty",
     "adm:crm",  # support tickets
     "adm:ticket",
@@ -54,10 +55,34 @@ OWNER_ONLY_CB_PREFIXES = (
 )
 
 
+def _escalation_id_set_sync() -> Set[int]:
+    """Best-effort sync read of cached escalation assistants (Redis)."""
+    try:
+        from src.core.redis import event_bus
+        redis = getattr(event_bus, "_redis", None) or getattr(event_bus, "redis", None)
+        if redis is None:
+            return set()
+        # Prefer sync get if available; otherwise empty (async path covers alerts)
+        getter = getattr(redis, "get", None)
+        if getter is None:
+            return set()
+        # aioredis get is async — cannot call here; use module cache if set
+        from src.core.services import manual_delivery_status as mds
+        cached = getattr(mds, "_ACL_ESCALATION_CACHE", None)
+        if cached:
+            return set(cached)
+    except Exception:
+        pass
+    return set()
+
+
 def is_whitelisted_admin(telegram_user_id: Optional[int]) -> bool:
     if telegram_user_id is None:
         return False
-    return int(telegram_user_id) in settings.admin_telegram_id_set
+    tid = int(telegram_user_id)
+    if tid in settings.admin_telegram_id_set:
+        return True
+    return tid in _escalation_id_set_sync()
 
 
 def is_owner(telegram_user_id: Optional[int]) -> bool:
@@ -69,7 +94,13 @@ def is_owner(telegram_user_id: Optional[int]) -> bool:
 def is_staff_only(telegram_user_id: Optional[int]) -> bool:
     if telegram_user_id is None:
         return False
-    return settings.is_staff_only(int(telegram_user_id))
+    tid = int(telegram_user_id)
+    if settings.is_staff_only(tid):
+        return True
+    # Escalation assistants get Staff-level access (manual delivery / review only)
+    if tid in _escalation_id_set_sync() and not settings.is_owner(tid):
+        return True
+    return False
 
 
 def staff_may_access(text: Optional[str] = None, callback_data: Optional[str] = None) -> bool:

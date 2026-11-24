@@ -144,6 +144,146 @@ async def publish_deposit_proof(payload: Dict[str, Any]) -> None:
     await event_bus.publish("channel:broadcast_proof", event)
 
 
+def format_trust_channel_card(data: Dict[str, Any], *, stage: str = "delivered") -> str:
+    """High-trust HTML card for قناة التوثيق — never includes credentials/receipts."""
+    order_num = data.get("order_number") or "—"
+    product = data.get("product_title") or "منتج رقمي"
+    qty = int(data.get("quantity") or 1)
+    pay = payment_method_label(data.get("payment_method"))
+    masked = mask_username(data.get("customer_username"), data.get("customer_first_name"))
+    if stage == "paid":
+        header = "✅ تم تأكيد الدفع وتسليم الطلب"
+        status = "تم الدفع والتسليم بنجاح ✅"
+    else:
+        header = "✅ تم توثيق عملية ناجحة"
+        status = "تم الدفع والتسليم بنجاح ✅"
+    return (
+        f"<b>{header}</b>\n\n"
+        f"🔖 الطلب: <code>#{order_num}</code>\n"
+        f"📦 المنتج: {product}\n"
+        f"⭐ الكمية: <code>{qty}</code>\n"
+        f"👤 العميل: <code>{masked}</code>\n"
+        f"💳 الدفع: <code>{pay}</code>\n"
+        f"📌 الحالة: {status}"
+    )
+
+
+def _cfg_truthy(val: Any, default: bool = False) -> bool:
+    if val is None:
+        return default
+    if isinstance(val, bool):
+        return val
+    return str(val).lower() in ("true", "1", "yes", "on")
+
+
+async def publish_to_proof_channel(
+    order_id: Any,
+    *,
+    stage: str = "delivered",
+    force: bool = False,
+    session=None,
+) -> Dict[str, Any]:
+    """
+    Idempotent trust-channel publish for an order.
+    - Requires proof_channel_id in BotConfig
+    - Skips if proof_posted_at already set (unless force=True still respects idempotency)
+    - Never includes delivered credentials / receipt files
+    """
+    from sqlalchemy import select
+    from sqlalchemy.orm import selectinload
+    from src.core.database import AsyncSessionLocal
+    from src.core.models.entities import Order, BotConfig
+    import uuid as _uuid
+
+    async def _run(sess) -> Dict[str, Any]:
+        oid = order_id if not isinstance(order_id, str) else _uuid.UUID(order_id)
+        order = (
+            await sess.execute(
+                select(Order)
+                .where(Order.id == oid)
+                .options(
+                    selectinload(Order.customer),
+                    selectinload(Order.master_product),
+                    selectinload(Order.invoice),
+                )
+            )
+        ).scalar_one_or_none()
+        if not order:
+            return {"status": "error", "reason": "order_not_found"}
+
+        if order.proof_posted_at is not None:
+            return {
+                "status": "skipped",
+                "reason": "already_posted",
+                "order_id": str(order.id),
+                "proof_posted_at": order.proof_posted_at.isoformat(),
+            }
+
+        rows = (
+            await sess.execute(
+                select(BotConfig).where(
+                    BotConfig.key.in_(["proof_channel_id", "proof_channel_auto_post", "auto_post_proofs_enabled"])
+                )
+            )
+        ).scalars().all()
+        cfg = {r.key: r.value for r in rows}
+        proof_ch = cfg.get("proof_channel_id") or ""
+        if isinstance(proof_ch, dict):
+            proof_ch = proof_ch.get("value") or ""
+        proof_ch = str(proof_ch or "").strip()
+        if not proof_ch:
+            return {"status": "error", "reason": "proof_channel_not_configured"}
+
+        if not force:
+            auto = cfg.get("proof_channel_auto_post")
+            if auto is None:
+                auto = cfg.get("auto_post_proofs_enabled")
+            if not _cfg_truthy(auto, default=False):
+                return {"status": "skipped", "reason": "auto_post_disabled", "order_id": str(order.id)}
+
+        cust = order.customer
+        pay_method = None
+        if order.invoice and order.invoice.payment_method:
+            pay_method = order.invoice.payment_method
+        payload = {
+            "type": "trust_channel",
+            "stage": stage,
+            "force": True,
+            "order_id": str(order.id),
+            "order_number": order.order_number,
+            "product_title": order.master_product.title_ar if order.master_product else None,
+            "product_id": str(order.master_product_id) if order.master_product_id else None,
+            "quantity": int(order.quantity or 1),
+            "payment_method": getattr(pay_method, "value", pay_method),
+            "customer_username": cust.telegram_username if cust else None,
+            "customer_first_name": cust.first_name if cust else None,
+            "delivered_product": None,
+            "receipt_file_id": None,
+        }
+        text = format_trust_channel_card(payload, stage=stage)
+        secrets = (order.delivered_product or "").strip()
+        if secrets and secrets in text:
+            text = text.replace(secrets, "***")
+
+        order.proof_posted_at = datetime.now(timezone.utc)
+        await sess.commit()
+
+        await event_bus.publish("channel:broadcast_proof", {**payload, "formatted_html": text})
+        logger.info(f"Proof channel publish queued for {order.order_number} stage={stage}")
+        return {
+            "status": "ok",
+            "order_id": str(order.id),
+            "order_number": order.order_number,
+            "stage": stage,
+            "text": text,
+        }
+
+    if session is not None:
+        return await _run(session)
+    async with AsyncSessionLocal() as sess:
+        return await _run(sess)
+
+
 async def get_proof_banner_config(session) -> Dict[str, Any]:
     """Optional thank-you / verified-delivery banner from BotConfig."""
     from sqlalchemy import select
@@ -173,8 +313,10 @@ class ProofService:
     format_purchase = staticmethod(format_purchase_proof_card)
     format_deposit = staticmethod(format_deposit_proof_card)
     format_restock = staticmethod(format_restock_card)
+    format_trust = staticmethod(format_trust_channel_card)
     publish_purchase = staticmethod(publish_purchase_proof)
     publish_deposit = staticmethod(publish_deposit_proof)
+    publish_to_proof_channel = staticmethod(publish_to_proof_channel)
     get_banner_config = staticmethod(get_proof_banner_config)
 
 

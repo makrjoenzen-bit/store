@@ -218,4 +218,4 @@ def test_owner_staff_config_properties():
 def test_dashboard_syp_settings_and_admin_bot_syp():
     assert "sham_cash_usd_to_syp_rate" in _read("dashboard/app/bot-config/page.tsx")
     assert "adm:settings:syp" in _read("src/admin_bot/handlers/orders.py")
-    assert "format_sham_cash_amount_line" in _read("src/bot/handlers/shop.py")
+    assert "format_sham_cash_amount_line" in _read("src/core/services/sham_cash_qr.py")

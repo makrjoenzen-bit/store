@@ -138,6 +138,7 @@ async def test_websocket_rejects_unauthorized(db_redis):
     class FakeWS:
         cookies = {}
         query_params = {}
+        headers = {}
 
         async def close(self, code=1000, reason=""):
             closed["code"] = code
@@ -148,17 +149,20 @@ async def test_websocket_rejects_unauthorized(db_redis):
 
 
 @pytest.mark.asyncio
-async def test_websocket_accepts_valid_token(db_redis):
+async def test_websocket_accepts_valid_cookie(db_redis):
     from src.api.main import websocket_endpoint
     from src.api.websocket.manager import ws_manager
+    from src.config import settings
 
     token = create_access_token({"sub": "sec_admin", "role": "admin"})
+    cookie_name = getattr(settings, "AUTH_COOKIE_NAME", None) or "access_token"
     connected = {"ok": False}
     closed = {}
 
     class FakeWS:
-        cookies = {}
-        query_params = {"token": token}
+        cookies = {cookie_name: token}
+        query_params = {"token": "must-be-ignored"}
+        headers = {"origin": "http://localhost:3000"}
 
         async def close(self, code=1000, reason=""):
             closed["code"] = code
@@ -182,6 +186,26 @@ async def test_websocket_accepts_valid_token(db_redis):
 
     assert connected["ok"] is True
     assert closed.get("code") != 1008
+
+
+@pytest.mark.asyncio
+async def test_websocket_rejects_query_token_only(db_redis):
+    """Query ?token= must NOT authenticate — cookie only."""
+    from src.api.main import websocket_endpoint
+
+    token = create_access_token({"sub": "sec_admin", "role": "admin"})
+    closed = {}
+
+    class FakeWS:
+        cookies = {}
+        query_params = {"token": token}
+        headers = {"origin": "http://localhost:3000"}
+
+        async def close(self, code=1000, reason=""):
+            closed["code"] = code
+
+    await websocket_endpoint(FakeWS())
+    assert closed.get("code") == 1008
 
 
 # ---------------------------------------------------------------------------

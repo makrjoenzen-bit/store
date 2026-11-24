@@ -268,26 +268,35 @@ class ShamCashService:
         if not payload:
             raise ValueError("Empty delivery payload")
 
+        already_paid = order.state in (
+            OrderState.PENDING_MANUAL_DELIVERY,
+            OrderState.PAYMENT_CONFIRMED,
+            OrderState.FAILED_MANUAL_REVIEW,
+            OrderState.QUOTE_LOCKED,
+            OrderState.FALLBACK_ROUTING,
+        )
+
         invoice = order.invoice
-        if invoice:
+        if invoice and invoice.status != InvoiceStatus.CONFIRMED:
             invoice.status = InvoiceStatus.CONFIRMED
             invoice.confirmed_at = datetime.now(timezone.utc)
             invoice.sham_cash_reviewed_by = reviewer
             invoice.sham_cash_reviewed_at = datetime.now(timezone.utc)
 
-        await order_service.transition_order_state(
-            session, order, OrderState.PAYMENT_CONFIRMED,
-            f"admin_manual_approve by {reviewer}",
-        )
+        if not already_paid or order.state == OrderState.SHAM_CASH_REVIEW:
+            await order_service.transition_order_state(
+                session, order, OrderState.PAYMENT_CONFIRMED,
+                f"admin_manual_approve by {reviewer}",
+            )
         # Zero supplier cost for manual local paste
         if order.supplier_cost is None:
             order.supplier_cost = 0
         session.add(AuditLog(
             admin_user_id=_uid(admin_user_id) if admin_user_id else None,
-            action="sham_cash_approve_manual",
+            action="manual_deliver",
             entity_type="order",
             entity_id=order.id,
-            old_values={},
+            old_values={"state": order.state.value if order.state else None},
             new_values=merge_audit_new_values(reviewer, {"mode": "manual_paste"}),
         ))
         await session.commit()
@@ -311,7 +320,7 @@ class ShamCashService:
             "order_id": str(order.id),
             "order_number": order.order_number,
             "mode": "manual",
-            "message": "Payment confirmed and product delivered manually.",
+            "message": "Product delivered manually.",
         }
 
     async def reject(

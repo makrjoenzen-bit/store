@@ -32,9 +32,18 @@ _login_fail_memory: dict[str, list[float]] = {}
 
 
 def _client_ip(request: Request) -> str:
-    forwarded = (request.headers.get("x-forwarded-for") or "").split(",")[0].strip()
-    if forwarded:
-        return forwarded
+    """
+    Prefer Nginx-set X-Real-IP. Never trust the left-most X-Forwarded-For
+    (client-spoofable). If only XFF is present, use the right-most hop.
+    """
+    real_ip = (request.headers.get("x-real-ip") or "").strip()
+    if real_ip:
+        return real_ip
+    xff = (request.headers.get("x-forwarded-for") or "").strip()
+    if xff:
+        parts = [p.strip() for p in xff.split(",") if p.strip()]
+        if parts:
+            return parts[-1]
     if request.client and request.client.host:
         return request.client.host
     return "unknown"
@@ -200,6 +209,13 @@ async def get_current_admin(
             detail="Invalid or expired authentication credentials",
             headers={"WWW-Authenticate": "Bearer"},
         )
+    jti = payload.get("jti")
+    if jti and await _is_jti_revoked(jti):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Token revoked",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
     username = payload.get("sub")
     stmt = select(AdminUser).where(AdminUser.username == username, AdminUser.is_active == True)  # noqa: E712
     admin = (await session.execute(stmt)).scalar_one_or_none()
@@ -208,39 +224,51 @@ async def get_current_admin(
     return admin
 
 
+async def _is_jti_revoked(jti: str) -> bool:
+    try:
+        from src.core.redis import event_bus
+        redis = event_bus._redis
+        if redis is not None:
+            return bool(await redis.get(f"auth:revoke:{jti}"))
+    except Exception:
+        pass
+    return False
+
+
+async def _revoke_jti(jti: str, ttl_seconds: int) -> None:
+    if not jti:
+        return
+    try:
+        from src.core.redis import event_bus
+        redis = event_bus._redis
+        if redis is not None:
+            await redis.set(f"auth:revoke:{jti}", "1", ex=max(60, int(ttl_seconds)))
+    except Exception:
+        pass
+
+
 async def _authenticate(session: AsyncSession, username: str, password: str) -> AdminUser:
+    """Authenticate against AdminUser. Initial seed requires ADMIN_USERNAME + ADMIN_PASSWORD in .env."""
     await _ensure_env_admin(session)
 
     stmt = select(AdminUser).where(AdminUser.username == username)
     admin = (await session.execute(stmt)).scalar_one_or_none()
 
-    # Legacy bootstrap: first login as admin when DB empty
-    if not admin and username == "admin":
-        count = (await session.execute(select(func.count()).select_from(AdminUser))).scalar() or 0
-        if count == 0:
-            admin = AdminUser(
-                username="admin",
-                password_hash=get_password_hash(password),
-                display_name="System Administrator",
-                role="admin",
-                is_active=True,
-            )
-            session.add(admin)
-            await session.commit()
-            await session.refresh(admin)
+    if admin and verify_password(password, admin.password_hash):
+        return admin
 
-    if not admin or not verify_password(password, admin.password_hash):
-        # Env fallback match
-        env_user = (settings.ADMIN_USERNAME or "").strip()
-        env_pass = (settings.ADMIN_PASSWORD or "").strip()
-        if env_user and env_pass and username == env_user and password == env_pass:
-            admin = await _ensure_env_admin(session)
-        if not admin or not verify_password(password, admin.password_hash):
-            raise HTTPException(
-                status_code=status.HTTP_401_UNAUTHORIZED,
-                detail="Incorrect username or password",
-            )
-    return admin
+    # Allow env credentials to re-sync the configured admin (never invent from submitted password)
+    env_user = (settings.ADMIN_USERNAME or "").strip()
+    env_pass = (settings.ADMIN_PASSWORD or "").strip()
+    if env_user and env_pass and username == env_user and password == env_pass:
+        admin = await _ensure_env_admin(session)
+        if admin and verify_password(password, admin.password_hash):
+            return admin
+
+    raise HTTPException(
+        status_code=status.HTTP_401_UNAUTHORIZED,
+        detail="Incorrect username or password",
+    )
 
 
 def _issue_token(admin: AdminUser) -> str:
@@ -299,7 +327,14 @@ async def login_json(
 
 
 @router.post("/logout")
-async def logout(response: Response):
+async def logout(request: Request, response: Response, token: Optional[str] = Depends(oauth2_scheme)):
+    raw = _extract_token(request, token)
+    if raw:
+        payload = decode_access_token(raw) or {}
+        jti = payload.get("jti")
+        if jti:
+            ttl = int(settings.ACCESS_TOKEN_EXPIRE_MINUTES or 1440) * 60
+            await _revoke_jti(str(jti), ttl)
     _clear_auth_cookie(response)
     return {"status": "ok"}
 

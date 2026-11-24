@@ -30,12 +30,44 @@ class OrderService:
     @staticmethod
     def generate_unique_invoice_amount(base_amount: Decimal) -> Decimal:
         """
-        Adds a random 4-decimal fraction (e.g. 0.0101 to 0.0999) to uniquely identify
-        the customer's on-chain transfer to our single hot wallet.
+        Adds a random 4-decimal fraction to uniquely identify the customer's transfer.
+        Prefer generate_unique_invoice_amount_safe() under concurrency.
+        Expanded range: 0.0001 .. 0.0999 (vs legacy 0.0101 .. 0.0999).
         """
-        unique_fraction = Decimal(str(random.randint(101, 999))) / Decimal("10000")
+        unique_fraction = Decimal(str(random.randint(1, 999))) / Decimal("10000")
         unique_total = base_amount + unique_fraction
         return unique_total.quantize(Decimal("0.0001"))
+
+    async def generate_unique_invoice_amount_safe(
+        self,
+        session: AsyncSession,
+        base_amount: Decimal,
+        payment_method: PaymentMethod,
+        *,
+        max_attempts: int = 20,
+    ) -> Decimal:
+        """Retry until unique_amount is free among currently PENDING invoices for this rail."""
+        from src.core.models.entities import PaymentInvoice
+
+        for _ in range(max_attempts):
+            candidate = self.generate_unique_invoice_amount(base_amount)
+            clash = (
+                await session.execute(
+                    select(PaymentInvoice.id).where(
+                        and_(
+                            PaymentInvoice.status == InvoiceStatus.PENDING,
+                            PaymentInvoice.payment_method == payment_method,
+                            PaymentInvoice.unique_amount == candidate,
+                        )
+                    ).limit(1)
+                )
+            ).scalar_one_or_none()
+            if clash is None:
+                return candidate
+        # Last resort: uuid-derived 4dp fraction
+        import uuid as _uuid
+        noise = Decimal(str((int(_uuid.uuid4().int % 999) + 1))) / Decimal("10000")
+        return (base_amount + noise).quantize(Decimal("0.0001"))
 
     async def create_order(
         self,
@@ -86,13 +118,19 @@ class OrderService:
         unique_amount = None
         deposit_addr = None
         if payment_method == PaymentMethod.USDT_BEP20_DIRECT:
-            unique_amount = self.generate_unique_invoice_amount(our_price)
+            unique_amount = await self.generate_unique_invoice_amount_safe(
+                session, our_price, payment_method
+            )
             deposit_addr = settings.HOT_WALLET_ADDRESS
         elif payment_method == PaymentMethod.USDT_TRC20_DIRECT:
-            unique_amount = self.generate_unique_invoice_amount(our_price)
+            unique_amount = await self.generate_unique_invoice_amount_safe(
+                session, our_price, payment_method
+            )
             deposit_addr = settings.TRON_HOT_WALLET_ADDRESS or None
         elif payment_method == PaymentMethod.BINANCE_PAY:
-            unique_amount = self.generate_unique_invoice_amount(our_price)
+            unique_amount = await self.generate_unique_invoice_amount_safe(
+                session, our_price, payment_method
+            )
             deposit_addr = (settings.BINANCE_PAY_MERCHANT_ID or "").strip() or None
 
         invoice = PaymentInvoice(

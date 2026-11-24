@@ -44,6 +44,13 @@ async def update_bot_configs(
             session.add(new_row)
 
     await session.commit()
+    # Keep escalation assistant ACL / live-feed cache warm
+    if "escalation_telegram_ids" in dto.configs:
+        try:
+            from src.core.services.manual_delivery_status import cache_escalation_ids
+            await cache_escalation_ids(dto.configs.get("escalation_telegram_ids"))
+        except Exception:
+            pass
     # Invalidate cache and broadcast to Bot & Dashboard
     await event_bus.publish_config_change("bot_config")
     return {"status": "ok", "message": "Bot configuration updated in real time"}

@@ -20,6 +20,8 @@ MESSAGES = {
         "buy_success": "✅ تم الشراء بنجاح!",
         "topup_success": "✅ تم شحن رصيدك بنجاح!",
         "low_balance": "رصيدك غير كافٍ. اختر وسيلة شحن سريعة:",
+        "manual_preparing": "جاري التجهيز (30–60 دقيقة)",
+        "order_confirmed_manual": "تم تأكيد طلبك بنجاح ✅\nجاري تجهيز وتسليم طلبك خلال 30–60 دقيقة.",
     },
     "en": {
         "menu_store": "🛍️ Open Store",
@@ -42,5 +44,7 @@ MESSAGES = {
         "buy_success": "✅ Purchase successful!",
         "topup_success": "✅ Balance topped up!",
         "low_balance": "Insufficient balance. Pick a quick top-up method:",
+        "manual_preparing": "Preparing (30–60 min)",
+        "order_confirmed_manual": "Your order is confirmed ✅\nWe are preparing your order; delivery will be completed within 30–60 minutes.",
     },
 }

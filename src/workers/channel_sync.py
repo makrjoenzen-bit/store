@@ -80,16 +80,26 @@ class ChannelSyncWorker:
 
     async def post_masked_proof_card(self, bot_username: str, data: dict):
         """Formats and delivers a high-conversion social proof card to the dedicated proof channel."""
-        # Check if auto_post_proofs_enabled is active
+        force = bool(data.get("force"))
         async with AsyncSessionLocal() as session:
-            cfg_stmt = select(BotConfig).where(BotConfig.key == "auto_post_proofs_enabled")
-            cfg_row = (await session.execute(cfg_stmt)).scalar_one_or_none()
-            if cfg_row and cfg_row.value is not None:
-                val = cfg_row.value
-                if isinstance(val, str) and val.lower() in ("false", "0", "no"):
-                    return
-                elif isinstance(val, bool) and not val:
-                    return
+            if not force:
+                # Prefer proof_channel_auto_post; fall back to legacy auto_post_proofs_enabled
+                auto_row = (
+                    await session.execute(
+                        select(BotConfig).where(
+                            BotConfig.key.in_(["proof_channel_auto_post", "auto_post_proofs_enabled"])
+                        )
+                    )
+                ).scalars().all()
+                by_key = {r.key: r.value for r in auto_row}
+                auto_val = by_key.get("proof_channel_auto_post")
+                if auto_val is None:
+                    auto_val = by_key.get("auto_post_proofs_enabled")
+                if auto_val is not None:
+                    if isinstance(auto_val, str) and auto_val.lower() in ("false", "0", "no"):
+                        return
+                    if isinstance(auto_val, bool) and not auto_val:
+                        return
 
             proof_ch_stmt = select(BotConfig).where(BotConfig.key == "proof_channel_id")
             proof_ch_row = (await session.execute(proof_ch_stmt)).scalar_one_or_none()
@@ -102,7 +112,20 @@ class ChannelSyncWorker:
         event_type = data.get("type", "order_completed")
         product_id = data.get("product_id")
 
-        if event_type == "order_completed":
+        if event_type == "trust_channel":
+            from src.core.services.proof_service import format_trust_channel_card
+            text = data.get("formatted_html") or format_trust_channel_card(
+                data, stage=data.get("stage") or "delivered"
+            )
+            kb = InlineKeyboardMarkup(
+                inline_keyboard=[
+                    [InlineKeyboardButton(
+                        text="🛍️ اطلب الآن",
+                        url=f"https://t.me/{bot_username}?start=buy_{product_id}" if product_id else f"https://t.me/{bot_username}",
+                    )],
+                ]
+            )
+        elif event_type == "order_completed":
             text = format_purchase_proof_card(data)
             kb = InlineKeyboardMarkup(
                 inline_keyboard=[
@@ -167,6 +190,7 @@ class ChannelSyncWorker:
 
         try:
             chat_target = int(proof_ch_id) if str(proof_ch_id).lstrip("-").isdigit() else proof_ch_id
+            parse_mode = ParseMode.HTML if event_type == "trust_channel" else ParseMode.MARKDOWN
             use_banner = (
                 banner
                 and banner.get("enabled")
@@ -179,14 +203,14 @@ class ChannelSyncWorker:
                     chat_id=chat_target,
                     photo=photo,
                     caption=text,
-                    parse_mode=ParseMode.MARKDOWN,
+                    parse_mode=parse_mode,
                     reply_markup=kb,
                 )
             else:
                 await self.bot.send_message(
                     chat_id=chat_target,
                     text=text,
-                    parse_mode=ParseMode.MARKDOWN,
+                    parse_mode=parse_mode,
                     reply_markup=kb,
                 )
             logger.info(f"Broadcasted live masked proof to channel {proof_ch_id}")

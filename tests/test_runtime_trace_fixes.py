@@ -201,20 +201,27 @@ async def test_sham_receipt_non_photo_stays_in_fsm(db_redis):
 
     state = MagicMock()
     state.get_state = AsyncMock(return_value=ShamCashUploadState.waiting_for_receipt.state)
+    state.get_data = AsyncMock(return_value={"order_id": "00000000-0000-0000-0000-000000000001"})
     state.clear = AsyncMock()
 
     msg = MagicMock()
     msg.text = "hello I paid"
     msg.photo = None
     msg.document = None
-    msg.from_user = MagicMock(id=777001, first_name="FSM", username="fsm", language_code="en")
+    u = MagicMock()
+    u.id = 777001
+    u.first_name = "FSM"
+    u.last_name = None
+    u.username = "fsm"
+    u.language_code = "en"
+    msg.from_user = u
     msg.answer = AsyncMock()
 
     await handle_receipt_non_photo(msg, state)
 
     msg.answer.assert_awaited()
     text = msg.answer.await_args.args[0]
-    assert "photo" in text.lower() or "Cancel" in text
+    assert "pdf" in text.lower() or "photo" in text.lower() or "Cancel" in text or "إيصال" in text
     state.clear.assert_not_awaited()
 
 

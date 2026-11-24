@@ -19,16 +19,36 @@ from src.admin_bot.formatters.alerts import (
     format_ticket_alert,
     format_low_balance_alert,
 )
-from src.admin_bot.keyboards.main_menu import sham_cash_claim_keyboard, sham_cash_review_keyboard
+from src.admin_bot.keyboards.main_menu import (
+    sham_cash_claim_keyboard,
+    sham_cash_review_keyboard,
+    manual_delivery_keyboard,
+)
 
 
-async def broadcast_to_admins(bot: Bot, text: str, reply_markup=None) -> int:
+async def _alert_recipient_ids(*, include_escalation: bool = False) -> set:
+    ids = set(settings.admin_telegram_id_set)
+    if include_escalation:
+        try:
+            from src.core.services.manual_delivery_status import get_escalation_telegram_ids
+            ids |= await get_escalation_telegram_ids(session=None)
+            # Also merge fresh DB value when Redis cache empty
+            from src.core.database import AsyncSessionLocal
+            async with AsyncSessionLocal() as session:
+                ids |= await get_escalation_telegram_ids(session)
+        except Exception as e:
+            logger.debug(f"escalation recipient resolve failed: {e}")
+    return ids
+
+
+async def broadcast_to_admins(bot: Bot, text: str, reply_markup=None, *, recipient_ids=None) -> int:
     """
-    Send a card to every whitelisted admin.
+    Send a card to every whitelisted admin (optionally + escalation assistants).
     Handles Telegram 429 FloodWait with retry_after sleep; never crashes the feed loop.
     """
     sent = 0
-    for admin_id in settings.admin_telegram_id_set:
+    targets = recipient_ids if recipient_ids is not None else settings.admin_telegram_id_set
+    for admin_id in targets:
         attempt = 0
         while attempt < 4:
             try:
@@ -37,6 +57,7 @@ async def broadcast_to_admins(bot: Bot, text: str, reply_markup=None) -> int:
                     text=text,
                     parse_mode="Markdown",
                     reply_markup=reply_markup,
+                    disable_notification=False,
                 )
                 sent += 1
                 break
@@ -57,13 +78,17 @@ async def broadcast_to_admins(bot: Bot, text: str, reply_markup=None) -> int:
 
 
 async def broadcast_manual_review(bot: Bot, data: dict) -> int:
-    """Fan-out Sham Cash / Binance review cards with media to ALL ADMIN_TELEGRAM_IDS."""
+    """Fan-out Sham Cash / Binance / manual-delivery cards to admins (+ assistants)."""
     caption = data.get("caption") or "مراجعة يدوية"
     if data.get("fraud_warning"):
         caption = f"{data['fraud_warning']}\n\n{caption}"
     order_id = data.get("order_id")
-    # Start with claim lock — actions unlock after claim
-    kb = sham_cash_claim_keyboard(str(order_id)) if order_id else None
+    review_kind = (data.get("review_kind") or "").lower()
+    # Manual fulfillment queue → direct adm:manual: button; Sham/Binance → claim lock first
+    if order_id and review_kind == "manual_delivery":
+        kb = manual_delivery_keyboard(str(order_id))
+    else:
+        kb = sham_cash_claim_keyboard(str(order_id)) if order_id else None
     media_file_id = data.get("media_file_id")
     media_type = (data.get("media_type") or "photo").lower()
     file_bytes = None
@@ -71,8 +96,13 @@ async def broadcast_manual_review(bot: Bot, data: dict) -> int:
     if media_file_id:
         file_bytes, path_hint = await safe_download_telegram_file(media_file_id)
 
+    recipients = await _alert_recipient_ids(
+        include_escalation=(review_kind == "manual_delivery")
+    )
+    disable_notification = bool(data.get("disable_notification", False))
+
     sent = 0
-    for admin_id in settings.admin_telegram_id_set:
+    for admin_id in recipients:
         attempt = 0
         while attempt < 4:
             try:
@@ -88,6 +118,7 @@ async def broadcast_manual_review(bot: Bot, data: dict) -> int:
                             caption=caption,
                             parse_mode="Markdown",
                             reply_markup=kb,
+                            disable_notification=disable_notification,
                         )
                     else:
                         await bot.send_photo(
@@ -96,6 +127,7 @@ async def broadcast_manual_review(bot: Bot, data: dict) -> int:
                             caption=caption,
                             parse_mode="Markdown",
                             reply_markup=kb,
+                            disable_notification=disable_notification,
                         )
                 else:
                     await bot.send_message(
@@ -103,6 +135,7 @@ async def broadcast_manual_review(bot: Bot, data: dict) -> int:
                         text=caption,
                         parse_mode="Markdown",
                         reply_markup=kb,
+                        disable_notification=disable_notification,
                     )
                 sent += 1
                 break

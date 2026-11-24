@@ -80,8 +80,8 @@ class WarrantyClaimState(StatesGroup):
 
 
 class ShamCashUploadState(StatesGroup):
-    waiting_for_tx_ref = State()
-    waiting_for_receipt = State()  # photo or PDF
+    waiting_for_tx_ref = State()  # optional legacy / manual ref
+    waiting_for_receipt = State()  # photo or PDF after sham_paid
 
 
 class BinancePayOrderState(StatesGroup):
@@ -1492,24 +1492,73 @@ async def pay_split_binance(callback: CallbackQuery, state: FSMContext):
         )
 
 
+async def _send_sham_cash_qr_card(
+    *,
+    bot,
+    chat_id: int,
+    session,
+    order: Order,
+    amount,
+    lang: str = "ar",
+    extra_preamble: str = "",
+):
+    """Send QR photo (or HTML fallback) with ✅ تم الدفع / Cancel under the card."""
+    from src.core.services.sham_cash_qr import (
+        build_sham_cash_caption,
+        get_sham_cash_payment_config,
+        resolve_qr_photo_input,
+    )
+    cfg = await get_sham_cash_payment_config(session)
+    caption = await build_sham_cash_caption(
+        session,
+        amount_usd=amount,
+        order_number=order.order_number,
+        lang=lang,
+    )
+    if extra_preamble:
+        caption = f"{extra_preamble}\n\n{caption}"
+    kb = sham_cash_payment_keyboard(
+        order_id=str(order.id),
+        account_code=str(cfg.get("account_number") or ""),
+        lang=lang,
+    )
+    photo, _src = await resolve_qr_photo_input(session)
+    if photo is not None:
+        try:
+            await bot.send_photo(
+                chat_id=chat_id,
+                photo=photo,
+                caption=caption,
+                parse_mode="HTML",
+                reply_markup=kb,
+            )
+            return
+        except Exception as e:
+            logger.warning(f"Sham Cash QR send failed, falling back to text: {e}")
+    await bot.send_message(chat_id=chat_id, text=caption, parse_mode="HTML", reply_markup=kb)
+
+
 @router.callback_query(F.data.startswith("pay:split_sham_cash:"))
 async def pay_split_sham_cash(callback: CallbackQuery, state: FSMContext):
     order_id = callback.data.split(":")[2]
-    await state.set_state(ShamCashUploadState.waiting_for_tx_ref)
+    await state.clear()
     await state.update_data(order_id=order_id)
 
     async with AsyncSessionLocal() as session:
         customer = await get_or_create_customer(session, callback.from_user)
+        lang = "en" if str(customer.language_code or "").lower().startswith("en") else "ar"
         stmt = select(Order).where(Order.id == _as_uuid(order_id)).options(selectinload(Order.invoice)).with_for_update()
         order = (await session.execute(stmt)).scalar_one_or_none()
         if not order:
             await callback.answer("الطلب غير موجود", show_alert=True)
             return
+        if order.customer_id != customer.id:
+            await callback.answer("هذا الطلب لا يخص حسابك.", show_alert=True)
+            return
 
         wallet_portion = min(customer.wallet_balance, order.our_price)
         remainder = order.our_price - wallet_portion
 
-        # Atomically reserve wallet portion
         if wallet_portion > 0:
             await order_service.debit_customer_wallet(
                 session=session,
@@ -1521,30 +1570,28 @@ async def pay_split_sham_cash(callback: CallbackQuery, state: FSMContext):
             )
             order.wallet_portion_reserved = wallet_portion
 
-        # Update invoice for remainder
         invoice = order.invoice
         invoice.amount_expected = remainder
         invoice.payment_method = PaymentMethod.SHAM_CASH
         await session.commit()
 
-        instructions = await get_dynamic_config(
-            session,
-            "sham_cash_instructions_ar",
-            "قم بالتحويل عبر تطبيق شام كاش إلى الحساب رقم: 09XXXXXXXX\nثم أرسل صورة إشعار التحويل هنا مباشرة."
+        preamble = (
+            f"✅ تم حجز رصيد المحفظة: <code>${float(wallet_portion):.2f}</code> USD\n"
+            f"💵 المتبقي عبر شام كاش: <code>${float(remainder):.2f}</code> USD"
         )
-
-        sham_acc = await get_dynamic_config(session, "sham_cash_account_number", "0991234567")
-        text = (
-            f"🏦 **دفع المتبقي عبر شام كاش (تحويل محلي):**\n\n"
-            f"✅ **تم حجز رصيد المحفظة:** `${wallet_portion:.2f}` USD\n"
-            f"💵 **المبلغ المتبقي المطلوب تحويله:** `${remainder:.2f}` USD\n\n"
-            f"📌 **تعليمات التحويل:**\n{instructions}\n\n"
-            f"🔢 **الخطوة 1 من 2:** يرجى إرسال **رقم العملية / الرقم المرجعي للتحويل**:"
-        )
-        await callback.message.edit_text(
-            text,
-            parse_mode="HTML",
-            reply_markup=sham_cash_payment_keyboard(order_id=str(order.id), account_code=str(sham_acc or "")),
+        await callback.answer()
+        try:
+            await callback.message.delete()
+        except Exception:
+            pass
+        await _send_sham_cash_qr_card(
+            bot=callback.bot,
+            chat_id=callback.from_user.id,
+            session=session,
+            order=order,
+            amount=remainder,
+            lang=lang,
+            extra_preamble=preamble,
         )
 
 
@@ -1791,37 +1838,93 @@ async def pay_balance(callback: CallbackQuery):
 @router.callback_query(F.data.startswith("pay:sham_cash:"))
 async def pay_sham_cash(callback: CallbackQuery, state: FSMContext):
     order_id = callback.data.split(":")[2]
-    await state.set_state(ShamCashUploadState.waiting_for_tx_ref)
+    await state.clear()
     await state.update_data(order_id=order_id)
 
     async with AsyncSessionLocal() as session:
-        stmt = select(Order).where(Order.id == _as_uuid(order_id))
+        customer = await get_or_create_customer(session, callback.from_user)
+        lang = "en" if str(customer.language_code or "").lower().startswith("en") else "ar"
+        stmt = (
+            select(Order)
+            .where(Order.id == _as_uuid(order_id))
+            .options(selectinload(Order.invoice))
+        )
         order = (await session.execute(stmt)).scalar_one_or_none()
-        price = order.our_price if order else "0.0"
+        if not order:
+            await callback.answer("الطلب غير موجود", show_alert=True)
+            return
+        if order.customer_id != customer.id:
+            await callback.answer("هذا الطلب لا يخص حسابك.", show_alert=True)
+            return
+        if order.invoice:
+            order.invoice.payment_method = PaymentMethod.SHAM_CASH
+            await session.commit()
 
-        instructions = await get_dynamic_config(
-            session,
-            "sham_cash_instructions_ar",
-            "قم بالتحويل عبر تطبيق شام كاش إلى الحساب رقم: 09XXXXXXXX\nثم أرسل صورة أو PDF إشعار التحويل هنا مباشرة."
+        await callback.answer()
+        try:
+            await callback.message.delete()
+        except Exception:
+            pass
+        await _send_sham_cash_qr_card(
+            bot=callback.bot,
+            chat_id=callback.from_user.id,
+            session=session,
+            order=order,
+            amount=order.our_price,
+            lang=lang,
         )
-        sham_acc = await get_dynamic_config(session, "sham_cash_account_number", "0991234567")
 
-        from src.core.services.syp_rate_service import format_sham_cash_amount_line
-        syp_line = await format_sham_cash_amount_line(session, price)
-        amount_block = f"المبلغ المطلوب: `${price}`"
-        if syp_line:
-            amount_block += f"\n💱 **بالليرة:** `{syp_line}`"
-        text = (
-            f"🏦 **الدفع عبر شام كاش (تحويل محلي)**\n\n"
-            f"{amount_block}\n\n"
-            f"📌 **تعليمات التحويل:**\n{instructions}\n\n"
-            f"🔢 **الخطوة 1 من 2:** يرجى إرسال **رقم العملية / الرقم المرجعي للتحويل** (الموجود في إشعار شام كاش):"
+
+@router.callback_query(F.data.startswith("sham_paid:"))
+async def sham_paid_prompt_receipt(callback: CallbackQuery, state: FSMContext):
+    """✅ تم الدفع → IDOR check → enter receipt upload FSM."""
+    from src.bot.keyboards.inline import sham_cash_receipt_prompt_keyboard
+
+    order_id = callback.data.split(":", 1)[1]
+    async with AsyncSessionLocal() as session:
+        customer = await get_or_create_customer(session, callback.from_user)
+        lang = "en" if str(customer.language_code or "").lower().startswith("en") else "ar"
+        order = (
+            await session.execute(
+                select(Order)
+                .where(Order.id == _as_uuid(order_id))
+                .options(selectinload(Order.invoice))
+            )
+        ).scalar_one_or_none()
+        if not order:
+            await callback.answer("الطلب غير موجود" if lang != "en" else "Order not found", show_alert=True)
+            return
+        if order.customer_id != customer.id:
+            await callback.answer(
+                "هذا الطلب لا يخص حسابك." if lang != "en" else "This order does not belong to you.",
+                show_alert=True,
+            )
+            return
+        awaiting = (
+            OrderState.CREATED,
+            OrderState.AWAITING_PAYMENT,
+            OrderState.SHAM_CASH_REVIEW,
         )
-        await callback.message.edit_text(
-            text,
-            parse_mode="HTML",
-            reply_markup=sham_cash_payment_keyboard(order_id=order_id, account_code=str(sham_acc or "")),
-        )
+        if order.state not in awaiting:
+            await callback.answer(
+                "تمت معالجة هذا الطلب مسبقاً." if lang != "en" else "This order was already processed.",
+                show_alert=True,
+            )
+            return
+
+    await state.set_state(ShamCashUploadState.waiting_for_receipt)
+    await state.update_data(order_id=order_id)
+    prompt = (
+        "Please upload the Sham Cash transfer PDF file (or receipt screenshot) to confirm your payment 📎"
+        if lang == "en"
+        else "الرجاء إرسال ملف الـ PDF (أو صورة إيصال التحويل) من تطبيق شام كاش لتأكيد الدفع 📎"
+    )
+    await callback.answer()
+    await callback.message.answer(
+        prompt,
+        parse_mode="HTML",
+        reply_markup=sham_cash_receipt_prompt_keyboard(order_id=order_id, lang=lang),
+    )
 
 
 @router.message(ShamCashUploadState.waiting_for_tx_ref, F.text)
@@ -1960,10 +2063,12 @@ async def _finalize_sham_receipt(
 
     await state.clear()
     await message.answer(
-        "⏳ تم استلام إيصالك بنجاح! فريقنا يراجع طلبك الآن "
-        "(عادةً خلال 5–15 دقيقة) وسيتم تسليم منتجك فوراً — شكراً لثقتك بنا.",
+        "تم استلام إيصال الدفع بنجاح ✅ جاري المراجعة من قبل الإدارة...",
         reply_markup=main_menu_keyboard(),
     )
+
+
+_SHAM_RECEIPT_MAX_BYTES = 10 * 1024 * 1024  # 10 MB
 
 
 @router.message(ShamCashUploadState.waiting_for_receipt, F.photo)
@@ -1974,6 +2079,9 @@ async def handle_receipt_photo(message: Message, state: FSMContext):
         file_obj = await message.bot.get_file(photo.file_id)
         file_stream = await message.bot.download_file(file_obj.file_path)
         file_bytes = file_stream.read()
+        if file_bytes and len(file_bytes) > _SHAM_RECEIPT_MAX_BYTES:
+            await message.answer("⚠️ الملف كبير جداً (الحد 10MB). أرسل صورة أو PDF أصغر.")
+            return
     except Exception as e:
         logger.warning(f"Could not compute photo hash: {e}")
     await _finalize_sham_receipt(
@@ -1992,13 +2100,21 @@ async def handle_receipt_pdf(message: Message, state: FSMContext):
     mime = (doc.mime_type or "").lower()
     name = (doc.file_name or "").lower()
     if mime != "application/pdf" and not name.endswith(".pdf"):
-        await message.answer("⚠️ يُقبل فقط ملف PDF أو صورة للإيصال. أعد الإرسال:")
+        await message.answer(
+            "⚠️ يُقبل فقط ملف PDF أو صورة للإيصال. أعد إرسال PDF أو صورة الإيصال:"
+        )
+        return
+    if doc.file_size and int(doc.file_size) > _SHAM_RECEIPT_MAX_BYTES:
+        await message.answer("⚠️ الملف كبير جداً (الحد 10MB). أرسل PDF أصغر.")
         return
     file_bytes = None
     try:
         file_obj = await message.bot.get_file(doc.file_id)
         file_stream = await message.bot.download_file(file_obj.file_path)
         file_bytes = file_stream.read()
+        if file_bytes and len(file_bytes) > _SHAM_RECEIPT_MAX_BYTES:
+            await message.answer("⚠️ الملف كبير جداً (الحد 10MB). أرسل PDF أصغر.")
+            return
     except Exception as e:
         logger.warning(f"Could not compute PDF hash: {e}")
     await _finalize_sham_receipt(
@@ -2013,20 +2129,24 @@ async def handle_receipt_pdf(message: Message, state: FSMContext):
 
 @router.message(ShamCashUploadState.waiting_for_receipt)
 async def handle_receipt_non_photo(message: Message, state: FSMContext):
-    """Keep FSM; do not fall through to AI concierge on text/stickers/etc."""
-    from src.bot.i18n import normalize_lang
-    from src.bot.keyboards.inline import cancel_fsm_keyboard
+    """Reject plain text/stickers; keep FSM — never fall through to AI concierge."""
+    from src.bot.keyboards.inline import sham_cash_receipt_prompt_keyboard
 
+    data = await state.get_data()
+    order_id = data.get("order_id") or ""
     lang = "ar"
     async with AsyncSessionLocal() as session:
         cust = await get_or_create_customer(session, message.from_user)
-        lang = normalize_lang(cust.language_code)
+        lang = "en" if str(cust.language_code or "").lower().startswith("en") else "ar"
     text = (
-        "Please send a photo of your transfer receipt only (or tap Cancel)."
+        "Please upload a Sham Cash PDF receipt or a receipt photo only (or tap Cancel). 📎"
         if lang == "en"
-        else "يرجى إرسال صورة إيصال التحويل فقط (أو اضغط إلغاء)."
+        else "يرجى إرسال ملف PDF أو صورة إيصال شام كاش فقط (أو اضغط إلغاء) 📎"
     )
-    await message.answer(text, reply_markup=cancel_fsm_keyboard())
+    await message.answer(
+        text,
+        reply_markup=sham_cash_receipt_prompt_keyboard(order_id=order_id, lang=lang),
+    )
 
 
 # ---------------- Binance Pay Order ID + payment help guides ----------------
@@ -2532,14 +2652,48 @@ async def cb_topup_payment_details(callback: CallbackQuery):
                     f"🆔 **معرف بينانس (Binance Pay ID):** `{binance_id}`\n\n"
                     f"بعد التحويل يُقيَّد الرصيد آلياً. إن تأخر، أرسل Pay Order ID للدعم."
                 )
-        else:  # sham_cash
-            sham_acc = await get_dynamic_config(session, "sham_cash_account_number", "0991234567")
-            text = (
-                f"🏦 **إيداع محلي عبر شام كاش (Sham Cash):**\n\n"
-                f"💵 **المبلغ المطلوب:** `${amount:.2f} USD`{bonus_note}\n"
-                f"📱 **رقم حساب شام كاش:** `{sham_acc}`\n\n"
-                f"بعد التحويل، يرجى التواصل مع الدعم الفني وتزويدهم بصورة الإشعار لتقييد الرصيد ومكافأة البونص مباشرة."
+        else:  # sham_cash — QR card (top-up still needs support for credit until dedicated flow)
+            from src.core.services.sham_cash_qr import build_sham_cash_caption, resolve_qr_photo_input, get_sham_cash_payment_config
+            cfg = await get_sham_cash_payment_config(session)
+            caption = await build_sham_cash_caption(session, amount_usd=amount, lang="ar")
+            caption = (
+                f"{caption}\n\n"
+                f"🎁 {bonus_note.strip()}\n"
+                f"بعد التحويل تواصل مع الدعم مع صورة الإشعار لتقييد الرصيد."
+                if bonus_note else
+                f"{caption}\n\nبعد التحويل تواصل مع الدعم مع صورة الإشعار لتقييد الرصيد."
             )
+            kb = InlineKeyboardMarkup(
+                inline_keyboard=[
+                    [InlineKeyboardButton(text="🛟 التواصل مع الدعم الفني", callback_data="user:support")],
+                    [InlineKeyboardButton(text="🔙 العودة للمحفظة", callback_data="user:wallet")],
+                ]
+            )
+            await callback.answer()
+            photo, _ = await resolve_qr_photo_input(session)
+            try:
+                await callback.message.delete()
+            except Exception:
+                pass
+            if photo is not None:
+                try:
+                    await callback.bot.send_photo(
+                        chat_id=callback.from_user.id,
+                        photo=photo,
+                        caption=caption,
+                        parse_mode="HTML",
+                        reply_markup=kb,
+                    )
+                    return
+                except Exception as e:
+                    logger.warning(f"Top-up Sham QR failed: {e}")
+            await callback.bot.send_message(
+                chat_id=callback.from_user.id,
+                text=caption,
+                parse_mode="HTML",
+                reply_markup=kb,
+            )
+            return
 
         kb = InlineKeyboardMarkup(
             inline_keyboard=[
@@ -2582,9 +2736,13 @@ async def process_coupon_code(message: Message, state: FSMContext):
         return
 
     async with AsyncSessionLocal() as session:
-        # Fetch coupon
+        # Fetch coupon + order under row locks (prevents max_uses races)
         now_utc = datetime.now(timezone.utc)
-        stmt = select(Coupon).where(Coupon.code == code, Coupon.is_active == True)
+        stmt = (
+            select(Coupon)
+            .where(Coupon.code == code, Coupon.is_active == True)  # noqa: E712
+            .with_for_update()
+        )
         coupon = (await session.execute(stmt)).scalar_one_or_none()
 
         if not coupon:
@@ -2604,11 +2762,10 @@ async def process_coupon_code(message: Message, state: FSMContext):
             await message.answer("⚠️ انتهت صلاحية هذا الكوبون.")
             return
 
-        if coupon.max_uses and coupon.used_count >= coupon.max_uses:
+        if coupon.max_uses and (coupon.used_count or 0) >= coupon.max_uses:
             await message.answer("⚠️ وصل هذا الكوبون إلى الحد الأقصى من مرات الاستخدام.")
             return
 
-        # Fetch Order
         order_stmt = (
             select(Order)
             .where(Order.id == _as_uuid(order_id))

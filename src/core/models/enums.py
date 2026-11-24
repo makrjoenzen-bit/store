@@ -58,6 +58,7 @@ class OrderState(str, Enum):
     SUPPLIER_ORDER_PLACED = "supplier_order_placed"
     SUPPLIER_ORDER_RECOVERY = "supplier_order_recovery"
     PENDING_SUPPLIER_DELIVERY = "pending_supplier_delivery"
+    PENDING_MANUAL_DELIVERY = "pending_manual_delivery"
     ORDER_FULFILLED = "order_fulfilled"
     DELIVERED = "delivered"
     COMPLETED = "completed"

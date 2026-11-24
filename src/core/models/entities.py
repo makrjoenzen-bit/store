@@ -144,7 +144,7 @@ class MasterProduct(Base):
     is_featured = Column(Boolean, default=False, nullable=False, index=True)
     subscription_duration_days = Column(Integer, nullable=True)
     search_keywords = Column(Text, nullable=True)  # comma-separated aliases
-    # local_first | local_only | api_first (default)
+    # local_first | local_only | api_first (default) | manual
     fulfillment_mode = Column(String(20), default="api_first", nullable=False)
     # Phase 17 — competitor radar auto-match (clamped by Profit Guard)
     auto_match_competitor = Column(Boolean, default=False, nullable=False)
@@ -295,11 +295,20 @@ class Order(Base):
     delivered_at = Column(DateTime(timezone=True), nullable=True)
     warranty_expires_at = Column(DateTime(timezone=True), nullable=True)
     renewal_reminder_sent = Column(Boolean, default=False, nullable=False)
+    # Trust / proof channel ("قناة التوثيق") — idempotent publish stamp
+    proof_posted_at = Column(DateTime(timezone=True), nullable=True, index=True)
 
     # Phase 16 — staff claim lock (manual Sham Cash / Binance review)
     claimed_by_telegram_id = Column(BigInteger, nullable=True, index=True)
     claimed_by_username = Column(String(100), nullable=True)
     claimed_at = Column(DateTime(timezone=True), nullable=True)
+
+    # Live manual-fulfillment countdown card (customer Telegram message)
+    status_chat_id = Column(BigInteger, nullable=True)
+    status_message_id = Column(BigInteger, nullable=True)
+    manual_deadline_at = Column(DateTime(timezone=True), nullable=True, index=True)
+    status_countdown_closed = Column(Boolean, default=False, nullable=False)
+    status_overdue_notified = Column(Boolean, default=False, nullable=False)
 
     state = Column(SQLEnum(OrderState), nullable=False, default=OrderState.CREATED, index=True)
     failure_reason = Column(Text, nullable=True)

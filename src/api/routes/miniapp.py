@@ -31,16 +31,44 @@ from src.config import settings
 
 
 def _resolve_deposit(method: PaymentMethod) -> str:
-    """Deposit address / Pay ID for invoice rails. Never invent a fake Binance ID."""
+    """Deposit address / Pay ID for crypto rails. Never invent fake IDs."""
     if method == PaymentMethod.USDT_BEP20_DIRECT:
         return settings.HOT_WALLET_ADDRESS or ""
     if method == PaymentMethod.USDT_TRC20_DIRECT:
         return (settings.TRON_HOT_WALLET_ADDRESS or "").strip()
     if method == PaymentMethod.BINANCE_PAY:
         return (settings.BINANCE_PAY_MERCHANT_ID or "").strip()
-    if method == PaymentMethod.SHAM_CASH:
-        return "0991234567"
     return ""
+
+
+async def _resolve_sham_cash_account(session: AsyncSession) -> str:
+    """Live Sham Cash account from BotConfig (same key as Admin Bot /bot-config)."""
+    row = (
+        await session.execute(
+            select(BotConfig.value).where(BotConfig.key == "sham_cash_account_number")
+        )
+    ).scalar_one_or_none()
+    if isinstance(row, dict):
+        # Defensive: value should be a string; tolerate accidental JSON wrap
+        row = row.get("value") or row.get("account") or ""
+    account = str(row or "").strip()
+    if not account or account in ("0991234567", "—", "-"):
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Sham Cash is not configured. Set sham_cash_account_number in Bot Config.",
+        )
+    return account
+
+
+async def _resolve_sham_cash_qr(session: AsyncSession) -> dict:
+    from src.core.services.sham_cash_qr import get_sham_cash_payment_config
+    cfg = await get_sham_cash_payment_config(session)
+    return {
+        "sham_cash_account_number": cfg.get("account_number") or "",
+        "sham_cash_qr_url": cfg.get("qr_url") or "",
+        "sham_cash_recipient_name": cfg.get("recipient_name") or "",
+        "sham_cash_instructions": cfg.get("instructions") or "",
+    }
 
 router = APIRouter(prefix="/miniapp", tags=["Telegram Mini App"])
 
@@ -286,6 +314,7 @@ async def get_miniapp_profile(
         progress_pct = min(100.0, ((spent - 500.0) / 1500.0) * 100.0)
 
     bot_username = "DigitalStoreBot"
+    sham_cfg = await _resolve_sham_cash_qr(session)
     return {
         "customer": {
             "id": str(customer.id),
@@ -317,6 +346,7 @@ async def get_miniapp_profile(
             "admin_telegram_id": settings.ADMIN_TELEGRAM_ID,
             "bot_username": bot_username,
             "payment_rails": rails,
+            **sham_cfg,
         }
     }
 
@@ -535,7 +565,11 @@ async def checkout_cart(
     if dto.coupon_code:
         now_utc = _utc_now()
         code = dto.coupon_code.strip().upper()
-        coup_stmt = select(Coupon).where(Coupon.code == code, Coupon.is_active == True)
+        coup_stmt = (
+            select(Coupon)
+            .where(Coupon.code == code, Coupon.is_active == True)  # noqa: E712
+            .with_for_update()
+        )
         coup = (await session.execute(coup_stmt)).scalar_one_or_none()
         if not coup:
             coupon_error = "كود الخصم غير صحيح أو غير مفعّل."
@@ -679,18 +713,25 @@ async def checkout_cart(
     elif dto.payment_method == "sham_cash":
         method_enum = PaymentMethod.SHAM_CASH
 
-    dep_address = _resolve_deposit(method_enum)
-    if method_enum in (
-        PaymentMethod.USDT_TRC20_DIRECT,
-        PaymentMethod.BINANCE_PAY,
-        PaymentMethod.USDT_BEP20_DIRECT,
-    ) and not dep_address:
-        raise HTTPException(
-            status_code=503,
-            detail=f"Payment rail {method_enum.value} is not configured",
-        )
+    sham_extra = {}
+    if method_enum == PaymentMethod.SHAM_CASH:
+        dep_address = await _resolve_sham_cash_account(session)
+        sham_extra = await _resolve_sham_cash_qr(session)
+    else:
+        dep_address = _resolve_deposit(method_enum)
+        if method_enum in (
+            PaymentMethod.USDT_TRC20_DIRECT,
+            PaymentMethod.BINANCE_PAY,
+            PaymentMethod.USDT_BEP20_DIRECT,
+        ) and not dep_address:
+            raise HTTPException(
+                status_code=503,
+                detail=f"Payment rail {method_enum.value} is not configured",
+            )
 
-    unique_amt = order_service.generate_unique_invoice_amount(final_payable)
+    unique_amt = await order_service.generate_unique_invoice_amount_safe(
+        session, final_payable, method_enum
+    )
     expires_at = _utc_now() + timedelta(minutes=settings.INVOICE_TIMEOUT_MINUTES or 30)
 
     invoice = PaymentInvoice(
@@ -719,6 +760,7 @@ async def checkout_cart(
             "expires_at": expires_at.isoformat(),
             "remaining_seconds": 1800,
             "coupon_error": coupon_error,
+            **sham_extra,
         }
     }
 
@@ -748,18 +790,25 @@ async def create_wallet_topup(
     elif dto.network == "sham_cash":
         method_enum = PaymentMethod.SHAM_CASH
 
-    dep_address = _resolve_deposit(method_enum)
-    if method_enum in (
-        PaymentMethod.USDT_TRC20_DIRECT,
-        PaymentMethod.BINANCE_PAY,
-        PaymentMethod.USDT_BEP20_DIRECT,
-    ) and not dep_address:
-        raise HTTPException(
-            status_code=503,
-            detail=f"Payment rail {method_enum.value} is not configured",
-        )
+    sham_extra = {}
+    if method_enum == PaymentMethod.SHAM_CASH:
+        dep_address = await _resolve_sham_cash_account(session)
+        sham_extra = await _resolve_sham_cash_qr(session)
+    else:
+        dep_address = _resolve_deposit(method_enum)
+        if method_enum in (
+            PaymentMethod.USDT_TRC20_DIRECT,
+            PaymentMethod.BINANCE_PAY,
+            PaymentMethod.USDT_BEP20_DIRECT,
+        ) and not dep_address:
+            raise HTTPException(
+                status_code=503,
+                detail=f"Payment rail {method_enum.value} is not configured",
+            )
 
-    unique_amt = order_service.generate_unique_invoice_amount(amt)
+    unique_amt = await order_service.generate_unique_invoice_amount_safe(
+        session, amt, method_enum
+    )
     expires_at = _utc_now() + timedelta(minutes=30)
 
     inv = PaymentInvoice(
@@ -787,6 +836,7 @@ async def create_wallet_topup(
             "currency": curr,
             "expires_at": expires_at.isoformat(),
             "remaining_seconds": 1800,
+            **sham_extra,
         }
     }
 
@@ -939,6 +989,7 @@ async def get_miniapp_orders(
             "is_warranty_active": is_warr_active,
             "formal_invoice_number": fi_num,
             "created_at": o.created_at.isoformat() if o.created_at else None,
+            "manual_deadline_at": o.manual_deadline_at.isoformat() if o.manual_deadline_at else None,
         })
 
     return {"orders": orders_out}
@@ -970,6 +1021,7 @@ async def get_miniapp_order_detail(
         "state": order.state.value,
         "our_price": float(order.our_price),
         "delivered_product": order.delivered_product,
+        "manual_deadline_at": order.manual_deadline_at.isoformat() if order.manual_deadline_at else None,
     }
 
 

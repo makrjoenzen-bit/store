@@ -36,13 +36,17 @@ async def lifespan(app: FastAPI):
     logger.info("Cleaned up engine and background tasks.")
 
 
+_docs = None if settings.is_production else "/api/docs"
+_redoc = None if settings.is_production else "/api/redoc"
+_openapi = None if settings.is_production else "/api/openapi.json"
+
 app = FastAPI(
     title="JIT Digital Aggregator API & Control Plane",
     version="1.0.0",
     lifespan=lifespan,
-    docs_url="/api/docs",
-    redoc_url="/api/redoc",
-    openapi_url="/api/openapi.json",
+    docs_url=_docs,
+    redoc_url=_redoc,
+    openapi_url=_openapi,
 )
 
 # CORS — explicit allowlist (credentials + "*" is invalid / unsafe)
@@ -74,19 +78,31 @@ app.include_router(reseller_api.router)
 
 @app.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket):
-    """Real-time streaming socket for Dashboard — requires admin JWT (cookie or ?token=)."""
+    """Real-time streaming socket for Dashboard — admin JWT from HttpOnly cookie only."""
     from src.core.security import decode_access_token
 
+    origin = (websocket.headers.get("origin") or "").strip()
+    allowed = set(settings.cors_origins_list or [])
+    if origin and allowed and origin not in allowed:
+        await websocket.close(code=1008, reason="Origin not allowed")
+        return
+
     cookie_name = getattr(settings, "AUTH_COOKIE_NAME", None) or "access_token"
-    token = (
-        websocket.cookies.get(cookie_name)
-        or websocket.query_params.get("token")
-        or websocket.query_params.get("access_token")
-    )
+    token = websocket.cookies.get(cookie_name)
     payload = decode_access_token(token) if token else None
     if not payload or not payload.get("sub"):
         await websocket.close(code=1008, reason="Unauthorized")
         return
+    jti = payload.get("jti")
+    if jti:
+        try:
+            from src.core.redis import event_bus
+            redis = event_bus._redis
+            if redis is not None and await redis.get(f"auth:revoke:{jti}"):
+                await websocket.close(code=1008, reason="Token revoked")
+                return
+        except Exception:
+            pass
 
     await ws_manager.connect(websocket)
     try:
