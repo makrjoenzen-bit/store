@@ -98,9 +98,10 @@ async def get_escalation_telegram_ids(session=None) -> Set[int]:
 
 async def cache_escalation_ids(raw: Any) -> None:
     """Persist escalation CSV to Redis + in-memory ACL cache."""
-    global _ACL_ESCALATION_CACHE
     ids = parse_telegram_id_csv(raw)
-    _ACL_ESCALATION_CACHE = set(ids)
+    # Mutate in place so importers (admin_acl / tests) keep a live reference
+    _ACL_ESCALATION_CACHE.clear()
+    _ACL_ESCALATION_CACHE.update(ids)
     try:
         from src.core.redis import get_redis_client
 
@@ -111,6 +112,65 @@ async def cache_escalation_ids(raw: Any) -> None:
         await redis.set("botcfg:escalation_telegram_ids", text or "")
     except Exception:
         pass
+
+
+async def warm_escalation_acl_cache(*, force: bool = False) -> Set[int]:
+    """
+    Load escalation_telegram_ids from BotConfig into _ACL_ESCALATION_CACHE.
+    Safe to call on every Admin Bot boot / cold ACL check.
+
+    force=True (boot): prefer authoritative DB, then refresh Redis.
+    force=False (cold ACL): Redis first, DB fallback.
+    """
+    global _ACL_ESCALATION_CACHE
+    if _ACL_ESCALATION_CACHE and not force:
+        return set(_ACL_ESCALATION_CACHE)
+    raw = None
+
+    async def _from_db():
+        from src.core.database import AsyncSessionLocal
+        from src.core.models.entities import BotConfig
+
+        async with AsyncSessionLocal() as session:
+            return (
+                await session.execute(
+                    select(BotConfig.value).where(BotConfig.key == "escalation_telegram_ids")
+                )
+            ).scalar_one_or_none()
+
+    async def _from_redis():
+        from src.core.redis import get_redis_client
+
+        redis = get_redis_client()
+        if redis is None:
+            return None
+        cached = await redis.get("botcfg:escalation_telegram_ids")
+        if cached is not None and str(cached).strip() != "":
+            return cached
+        return None
+
+    if force:
+        try:
+            raw = await _from_db()
+        except Exception:
+            raw = None
+        if raw is None:
+            try:
+                raw = await _from_redis()
+            except Exception:
+                raw = None
+    else:
+        try:
+            raw = await _from_redis()
+        except Exception:
+            raw = None
+        if raw is None:
+            try:
+                raw = await _from_db()
+            except Exception:
+                raw = None
+    await cache_escalation_ids(raw or "")
+    return set(_ACL_ESCALATION_CACHE)
 
 
 def progress_bar(elapsed_ratio: float, width: int = PROGRESS_WIDTH) -> str:

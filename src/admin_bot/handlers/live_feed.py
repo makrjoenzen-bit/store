@@ -55,7 +55,7 @@ async def broadcast_to_admins(bot: Bot, text: str, reply_markup=None, *, recipie
                 await bot.send_message(
                     chat_id=admin_id,
                     text=text,
-                    parse_mode="Markdown",
+                    parse_mode="HTML",
                     reply_markup=reply_markup,
                     disable_notification=False,
                 )
@@ -116,7 +116,7 @@ async def broadcast_manual_review(bot: Bot, data: dict) -> int:
                             chat_id=admin_id,
                             document=buf,
                             caption=caption,
-                            parse_mode="Markdown",
+                            parse_mode="HTML",
                             reply_markup=kb,
                             disable_notification=disable_notification,
                         )
@@ -125,7 +125,7 @@ async def broadcast_manual_review(bot: Bot, data: dict) -> int:
                             chat_id=admin_id,
                             photo=buf,
                             caption=caption,
-                            parse_mode="Markdown",
+                            parse_mode="HTML",
                             reply_markup=kb,
                             disable_notification=disable_notification,
                         )
@@ -133,7 +133,7 @@ async def broadcast_manual_review(bot: Bot, data: dict) -> int:
                     await bot.send_message(
                         chat_id=admin_id,
                         text=caption,
-                        parse_mode="Markdown",
+                        parse_mode="HTML",
                         reply_markup=kb,
                         disable_notification=disable_notification,
                     )
@@ -162,20 +162,23 @@ def render_live_event(channel: str, data: dict) -> tuple[Optional[str], object]:
         text = format_order_state_alert(data)
         kb = None
         if new_state == "sham_cash_review":
+            from html import escape as _esc
             order_id = data.get("order_id")
             if order_id:
                 kb = sham_cash_claim_keyboard(str(order_id))
                 details = data.get("details") or {}
                 order_number = details.get("order_number") or order_id
                 supplier = details.get("supplier_name") or data.get("supplier_name")
-                supplier_line = f"\n🏭 المورد / التاجر: **{supplier}**" if supplier else ""
+                supplier_line = (
+                    f"\n🏭 المورد / التاجر: <b>{_esc(str(supplier))}</b>" if supplier else ""
+                )
                 fraud = data.get("fraud_warning") or details.get("fraud_warning") or ""
-                fraud_line = f"{fraud}\n\n" if fraud else ""
+                fraud_line = f"{_esc(str(fraud))}\n\n" if fraud else ""
                 text = (
                     f"{fraud_line}"
-                    f"⏳ **إيصال شام كاش بانتظار المراجعة**\n\n"
-                    f"🔖 الطلب: `{order_number}`{supplier_line}\n"
-                    f"اضغط **استلام الطلب** ثم الموافقة أو الرفض:"
+                    f"⏳ <b>إيصال شام كاش بانتظار المراجعة</b>\n\n"
+                    f"🔖 الطلب: <code>{_esc(str(order_number))}</code>{supplier_line}\n"
+                    f"اضغط <b>استلام الطلب</b> ثم الموافقة أو الرفض:"
                 )
         return text, kb
 

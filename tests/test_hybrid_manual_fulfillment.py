@@ -168,6 +168,8 @@ async def test_manual_mode_routes_to_pending_manual_no_refund(db_redis):
     admin_alerts = [p for p in published if p["channel"] == "admin:manual_review"]
     assert admin_alerts
     assert admin_alerts[0]["message"].get("review_kind") == "manual_delivery"
+    assert admin_alerts[0]["message"].get("supplier_name") == "مخزون محلي / يدوي"
+    assert "المورد" in (admin_alerts[0]["message"].get("caption") or "")
 
 
 @pytest.mark.asyncio

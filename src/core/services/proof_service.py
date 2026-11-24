@@ -146,11 +146,12 @@ async def publish_deposit_proof(payload: Dict[str, Any]) -> None:
 
 def format_trust_channel_card(data: Dict[str, Any], *, stage: str = "delivered") -> str:
     """High-trust HTML card for قناة التوثيق — never includes credentials/receipts."""
-    order_num = data.get("order_number") or "—"
-    product = data.get("product_title") or "منتج رقمي"
+    from html import escape as _esc
+    order_num = _esc(str(data.get("order_number") or "—"))
+    product = _esc(str(data.get("product_title") or "منتج رقمي"))
     qty = int(data.get("quantity") or 1)
-    pay = payment_method_label(data.get("payment_method"))
-    masked = mask_username(data.get("customer_username"), data.get("customer_first_name"))
+    pay = _esc(payment_method_label(data.get("payment_method")))
+    masked = _esc(mask_username(data.get("customer_username"), data.get("customer_first_name")))
     if stage == "paid":
         header = "✅ تم تأكيد الدفع وتسليم الطلب"
         status = "تم الدفع والتسليم بنجاح ✅"

@@ -49,6 +49,15 @@ async def main():
     dp.include_router(marketing.router)
     dp.include_router(settings_hub.router)
 
+    # Warm assistant escalation ACL so adm:manual: works right after container restart
+    try:
+        from src.core.services.manual_delivery_status import warm_escalation_acl_cache
+        warmed = await warm_escalation_acl_cache(force=True)
+        if warmed:
+            logger.info(f"Escalation ACL warmed: {sorted(warmed)}")
+    except Exception as e:
+        logger.warning(f"Escalation ACL warm failed (assistants may need first config hit): {e}")
+
     feed_task = asyncio.create_task(listen_admin_live_feed(bot))
     logger.info(
         f"Admin Control Bot starting. Whitelisted IDs: {sorted(settings.admin_telegram_id_set)}"

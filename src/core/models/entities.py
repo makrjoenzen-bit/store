@@ -242,6 +242,17 @@ class Customer(Base):
     blocked_reason = Column(Text, nullable=True)
     account_status = Column(SQLEnum(CustomerStatus), default=CustomerStatus.ACTIVE, nullable=False, index=True)
 
+    @property
+    def is_banned(self) -> bool:
+        """Unified ban flag for Mini App / bot gates (blocked OR account_status=banned)."""
+        if self.is_blocked:
+            return True
+        status = self.account_status
+        if status is None:
+            return False
+        val = getattr(status, "value", status)
+        return str(val).lower() == "banned"
+
     referred_by = Column(UUID(as_uuid=True), ForeignKey("customers.id"), nullable=True)
     referral_code = Column(String(20), unique=True, nullable=True)
     referral_earnings = Column(Numeric(18, 4), default=Decimal("0.0"), nullable=False)

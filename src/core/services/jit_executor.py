@@ -832,17 +832,49 @@ class JitExecutor:
                 "text": cust_text,
             })
 
+        from html import escape as _esc
         product_title = (
             order.master_product.title_ar if order.master_product else "—"
         )
+        # Admin-only supplier context (never sent to customers)
+        supplier_name = None
+        supplier_cost = float(order.supplier_cost) if order.supplier_cost is not None else None
+        if order.supplier and getattr(order.supplier, "name", None):
+            supplier_name = order.supplier.name
+        if not supplier_name:
+            try:
+                from src.core.models.entities import ProductSupplierLink, Supplier
+                link = (
+                    await session.execute(
+                        select(ProductSupplierLink)
+                        .where(ProductSupplierLink.master_product_id == order.master_product_id)
+                        .options(selectinload(ProductSupplierLink.supplier))
+                        .order_by(ProductSupplierLink.last_known_cost.asc())
+                        .limit(1)
+                    )
+                ).scalar_one_or_none()
+                if link and link.supplier:
+                    supplier_name = link.supplier.name
+                    if supplier_cost is None and link.last_known_cost is not None:
+                        supplier_cost = float(link.last_known_cost)
+            except Exception:
+                pass
+        if not supplier_name:
+            supplier_name = "مخزون محلي / يدوي"
+        cost_line = (
+            f"\n💵 تكلفة المورد: <code>${supplier_cost:.2f}</code>"
+            if supplier_cost is not None else ""
+        )
         caption = (
-            f"📦 **تسليم يدوي** — طلب جديد\n\n"
-            f"🔖 `{order.order_number}`\n"
-            f"📦 {product_title}\n"
+            f"📦 <b>تسليم يدوي</b> — طلب جديد\n\n"
+            f"🔖 <code>{_esc(str(order.order_number))}</code>\n"
+            f"📦 {_esc(str(product_title))}\n"
             f"💵 ${float(order.our_price or 0):.2f}\n"
-            f"📝 {reason}\n"
+            f"🏭 المورد / التاجر: <b>{_esc(str(supplier_name))}</b>"
+            f"{cost_line}\n"
+            f"📝 {_esc(str(reason))}\n"
             f"⏱️ SLA: {sla_min} دقيقة\n\n"
-            f"اضغط **تسليم يدوي** ثم أرسل الحساب/المفتاح:"
+            f"اضغط <b>تسليم يدوي</b> ثم أرسل الحساب/المفتاح:"
         )
         await event_bus.publish("admin:manual_review", {
             "order_id": str(order.id),
@@ -851,6 +883,8 @@ class JitExecutor:
             "review_kind": "manual_delivery",
             "amount": float(order.our_price or 0),
             "product_title": product_title,
+            "supplier_name": supplier_name,
+            "supplier_cost": supplier_cost,
             "disable_notification": False,
             "escalation_stage": "immediate",
         })

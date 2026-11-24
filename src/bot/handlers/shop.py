@@ -2062,10 +2062,24 @@ async def _finalize_sham_receipt(
         })
 
     await state.clear()
-    await message.answer(
-        "تم استلام إيصال الدفع بنجاح ✅ جاري المراجعة من قبل الإدارة...",
-        reply_markup=main_menu_keyboard(),
-    )
+    confirm_lang = "ar"
+    async with AsyncSessionLocal() as session:
+        cust = await get_or_create_customer(session, message.from_user)
+        if cust and str(cust.language_code or "").lower().startswith("en"):
+            confirm_lang = "en"
+    if confirm_lang == "en":
+        confirm_text = (
+            "Payment receipt received successfully ✅\n"
+            "Your order is secured and under review now. Confirmation and preparation "
+            "will complete within 30–60 minutes, then we will send it to you here in DM."
+        )
+    else:
+        confirm_text = (
+            "تم استلام إيصال الدفع بنجاح ✅\n"
+            "طلبك مضمون وقيد المراجعة الآن، وسيتم تأكيده وتجهيزه خلال 30–60 دقيقة "
+            "ثم إرساله لك هنا على الخاص."
+        )
+    await message.answer(confirm_text, reply_markup=main_menu_keyboard())
 
 
 _SHAM_RECEIPT_MAX_BYTES = 10 * 1024 * 1024  # 10 MB

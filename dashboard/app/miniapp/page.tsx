@@ -112,19 +112,30 @@ function ManualPrepTimer({
   const deadlineMs = deadlineIso ? new Date(deadlineIso).getTime() : NaN;
   const hasDeadline = Number.isFinite(deadlineMs);
   const remSec = hasDeadline ? Math.max(0, Math.floor((deadlineMs - now) / 1000)) : 0;
+  const overdue = hasDeadline && remSec <= 0;
   const slaSec = 60 * 60;
   const elapsedRatio = hasDeadline
     ? Math.min(1, Math.max(0, 1 - remSec / slaSec))
     : 0.15;
-  const pct = Math.round(elapsedRatio * 100);
+  const pct = overdue ? 100 : Math.round(elapsedRatio * 100);
   const pulse = Math.floor(now / 1000) % 2 === 0 ? "⏳" : "⌛";
+  const overdueHint =
+    lang === "ar"
+      ? "نعتذر عن التأخير — طلبك قيد التجهيز العاجل الآن"
+      : "Sorry for the delay — your order is being prepared urgently";
 
   return (
     <div className="mt-2 space-y-1.5">
       <div className="flex items-center justify-between text-xs">
         <span className="inline-flex items-center gap-1.5 font-semibold" style={{ color: accent }}>
           <span className="inline-block animate-pulse text-base leading-none">{pulse}</span>
-          {lang === "ar" ? "العدّاد المباشر" : "Live countdown"}
+          {overdue
+            ? lang === "ar"
+              ? "تأخير بسيط"
+              : "Slight delay"
+            : lang === "ar"
+              ? "العدّاد المباشر"
+              : "Live countdown"}
         </span>
         <span className="font-mono tabular-nums text-sm font-bold" style={{ color: accent }}>
           {hasDeadline ? formatMmSs(remSec) : "—"}
@@ -140,7 +151,7 @@ function ManualPrepTimer({
         />
       </div>
       <div className="text-[11px] leading-relaxed" style={{ color: hintColor }}>
-        {hint}
+        {overdue ? overdueHint : hint}
       </div>
     </div>
   );

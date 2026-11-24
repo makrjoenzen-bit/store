@@ -146,11 +146,22 @@ class AdminAclMiddleware(BaseMiddleware):
                     user_id = event.callback_query.from_user.id
 
         if not is_whitelisted_admin(user_id):
-            logger.warning(
-                f"Admin Bot ACL DENY: telegram_id={user_id} not in ADMIN/OWNER/STAFF IDs"
-            )
-            await self._deny(event, "⛔ غير مصرح لك باستخدام بوت الإدارة.")
-            return None
+            # Cold cache after restart — try loading escalation assistants once
+            try:
+                from src.core.services.manual_delivery_status import (
+                    _ACL_ESCALATION_CACHE,
+                    warm_escalation_acl_cache,
+                )
+                if not _ACL_ESCALATION_CACHE:
+                    await warm_escalation_acl_cache(force=False)
+            except Exception:
+                pass
+            if not is_whitelisted_admin(user_id):
+                logger.warning(
+                    f"Admin Bot ACL DENY: telegram_id={user_id} not in ADMIN/OWNER/STAFF IDs"
+                )
+                await self._deny(event, "⛔ غير مصرح لك باستخدام بوت الإدارة.")
+                return None
 
         # Inject role into handler data
         data["is_owner"] = is_owner(user_id)

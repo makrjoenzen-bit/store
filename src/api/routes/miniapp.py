@@ -208,7 +208,7 @@ async def get_current_miniapp_customer(
             customer.vip_tier = new_tier
             await session.commit()
 
-    if customer.is_blocked:
+    if getattr(customer, "is_banned", False) or customer.is_blocked:
         raise HTTPException(status_code=403, detail="Customer account is suspended.")
 
     return customer
