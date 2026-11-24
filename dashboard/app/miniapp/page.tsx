@@ -20,6 +20,14 @@ const COPY = {
     emptyTx: "لا حركات رصيد بعد",
     checkout: "تأكيد الشراء من الرصيد",
     topup: "طلب شحن رصيد",
+    topupAmount: "المبلغ",
+    topupCustom: "مبلغ مخصص",
+    topupMethod: "وسيلة الدفع",
+    topupConfirm: "تأكيد الشحن",
+    railSham: "شام كاش",
+    railBep20: "USDT BEP-20",
+    railTrc20: "USDT TRC-20",
+    railBinance: "Binance Pay",
     support: "الدعم",
     lang: "اللغة",
     loading: "جارٍ التحميل…",
@@ -45,6 +53,14 @@ const COPY = {
     emptyTx: "No transactions yet",
     checkout: "Pay from balance",
     topup: "Request top-up",
+    topupAmount: "Amount",
+    topupCustom: "Custom amount",
+    topupMethod: "Payment method",
+    topupConfirm: "Confirm top-up",
+    railSham: "Sham Cash",
+    railBep20: "USDT BEP-20",
+    railTrc20: "USDT TRC-20",
+    railBinance: "Binance Pay",
     support: "Support",
     lang: "Language",
     loading: "Loading…",
@@ -188,9 +204,29 @@ export default function MiniAppPage() {
   const [orderDetail, setOrderDetail] = useState<any>(null);
   const [showSuccess, setShowSuccess] = useState(false);
   const [theme, setTheme] = useState<Record<string, string>>({});
+  const [topupAmount, setTopupAmount] = useState<number>(10);
+  const [topupCustom, setTopupCustom] = useState("");
+  const [topupNetwork, setTopupNetwork] = useState<string>("sham_cash");
 
   const t = COPY[lang];
   const dir = lang === "ar" ? "rtl" : "ltr";
+
+  const paymentRails = useMemo(() => {
+    const rails = profile?.config?.payment_rails || {};
+    const opts: { id: string; label: string }[] = [];
+    if (rails.sham_cash !== false) opts.push({ id: "sham_cash", label: t.railSham });
+    if (rails.usdt_bep20) opts.push({ id: "usdt_bep20", label: t.railBep20 });
+    if (rails.usdt_trc20) opts.push({ id: "usdt_trc20", label: t.railTrc20 });
+    if (rails.binance_pay !== false) opts.push({ id: "binance_pay", label: t.railBinance });
+    if (opts.length === 0) opts.push({ id: "sham_cash", label: t.railSham });
+    return opts;
+  }, [profile, t.railSham, t.railBep20, t.railTrc20, t.railBinance]);
+
+  useEffect(() => {
+    if (!paymentRails.some((r) => r.id === topupNetwork)) {
+      setTopupNetwork(paymentRails[0]?.id || "sham_cash");
+    }
+  }, [paymentRails, topupNetwork]);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -330,18 +366,35 @@ export default function MiniAppPage() {
     }
   };
 
+  const resolvedTopupAmount = useMemo(() => {
+    const custom = Number(topupCustom);
+    if (topupCustom.trim() && Number.isFinite(custom) && custom > 0) return custom;
+    return topupAmount;
+  }, [topupAmount, topupCustom]);
+
   const requestTopup = async () => {
     haptic("light");
+    const amount = Number(resolvedTopupAmount);
+    if (!Number.isFinite(amount) || amount < 1) {
+      setMsg(lang === "ar" ? "أدخل مبلغاً صالحاً" : "Enter a valid amount");
+      return;
+    }
     setBusy(true);
     try {
-      await api("/wallet/topup", {
+      const res = await api("/wallet/topup", {
         method: "POST",
-        body: JSON.stringify({ amount: 10, network: "sham_cash" }),
+        body: JSON.stringify({ amount, network: topupNetwork }),
       });
       haptic("success");
       setShowSuccess(true);
       setTimeout(() => setShowSuccess(false), 1400);
-      setMsg(lang === "ar" ? "تم إرسال طلب الشحن — بانتظار موافقة الإدارة" : "Top-up requested — awaiting admin approval");
+      const inv = res?.invoice;
+      const addr = inv?.deposit_address || inv?.unique_amount;
+      setMsg(
+        lang === "ar"
+          ? `تم إنشاء فاتورة شحن $${amount.toFixed(2)} — ${addr ? `التفاصيل: ${addr}` : "بانتظار الدفع"}`
+          : `Top-up invoice $${amount.toFixed(2)} created — ${addr ? `details: ${addr}` : "awaiting payment"}`
+      );
       await load();
     } catch (e: any) {
       haptic("error");
@@ -540,17 +593,80 @@ export default function MiniAppPage() {
 
         {tab === "balance" && !loading && (
           <div className="space-y-4">
-            <div className="rounded-2xl border p-5" style={{ background: secondary, borderColor: `${hint}33` }}>
-              <div className="text-xs" style={{ color: hint }}>{t.bal}</div>
-              <div className="text-3xl font-bold mt-1 tabular-nums">${bal.toFixed(2)}</div>
+            <div className="rounded-2xl border p-5 space-y-4" style={{ background: secondary, borderColor: `${hint}33` }}>
+              <div>
+                <div className="text-xs" style={{ color: hint }}>{t.bal}</div>
+                <div className="text-3xl font-bold mt-1 tabular-nums">${bal.toFixed(2)}</div>
+              </div>
+
+              <div>
+                <div className="text-xs mb-2" style={{ color: hint }}>{t.topupAmount}</div>
+                <div className="grid grid-cols-4 gap-2">
+                  {[5, 10, 25, 50].map((amt) => (
+                    <button
+                      key={amt}
+                      type="button"
+                      onClick={() => {
+                        setTopupAmount(amt);
+                        setTopupCustom("");
+                        haptic("light");
+                      }}
+                      className="py-2 rounded-xl text-sm font-semibold border"
+                      style={{
+                        background: !topupCustom && topupAmount === amt ? button : `${secondary}`,
+                        color: !topupCustom && topupAmount === amt ? buttonText : text,
+                        borderColor: `${hint}44`,
+                      }}
+                    >
+                      ${amt}
+                    </button>
+                  ))}
+                </div>
+                <input
+                  type="number"
+                  min={1}
+                  step="0.01"
+                  inputMode="decimal"
+                  placeholder={t.topupCustom}
+                  value={topupCustom}
+                  onChange={(e) => setTopupCustom(e.target.value)}
+                  className="mt-2 w-full rounded-xl border px-3 py-2 text-sm outline-none"
+                  style={{ background: bg, borderColor: `${hint}44`, color: text }}
+                />
+              </div>
+
+              <div>
+                <div className="text-xs mb-2" style={{ color: hint }}>{t.topupMethod}</div>
+                <div className="flex flex-wrap gap-2">
+                  {paymentRails.map((rail) => (
+                    <button
+                      key={rail.id}
+                      type="button"
+                      onClick={() => {
+                        setTopupNetwork(rail.id);
+                        haptic("light");
+                      }}
+                      className="px-3 py-1.5 rounded-lg text-xs font-semibold border"
+                      style={{
+                        background: topupNetwork === rail.id ? button : "transparent",
+                        color: topupNetwork === rail.id ? buttonText : text,
+                        borderColor: `${hint}44`,
+                      }}
+                    >
+                      {rail.label}
+                    </button>
+                  ))}
+                </div>
+              </div>
+
               <button
                 type="button"
                 disabled={busy}
                 onClick={requestTopup}
-                className="mt-4 w-full py-2.5 rounded-xl text-sm font-bold disabled:opacity-50"
+                className="w-full py-2.5 rounded-xl text-sm font-bold disabled:opacity-50"
                 style={{ background: "#059669", color: "#fff" }}
               >
-                {t.topup}
+                {t.topupConfirm} · ${Number(resolvedTopupAmount || 0).toFixed(2)}
               </button>
             </div>
             <div className="space-y-2">

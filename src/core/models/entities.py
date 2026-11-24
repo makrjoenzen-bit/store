@@ -169,8 +169,14 @@ class ProductSupplierLink(Base):
     __tablename__ = "product_supplier_links"
 
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
-    master_product_id = Column(UUID(as_uuid=True), ForeignKey("master_products.id", ondelete="CASCADE"), nullable=False)
-    supplier_id = Column(UUID(as_uuid=True), ForeignKey("suppliers.id", ondelete="CASCADE"), nullable=False)
+    master_product_id = Column(
+        UUID(as_uuid=True), ForeignKey("master_products.id", ondelete="CASCADE"),
+        nullable=False, index=True,
+    )
+    supplier_id = Column(
+        UUID(as_uuid=True), ForeignKey("suppliers.id", ondelete="CASCADE"),
+        nullable=False, index=True,
+    )
     supplier_product_id = Column(String(100), nullable=False)
     supplier_product_name = Column(String(300), nullable=True)
 
@@ -300,7 +306,7 @@ class Order(Base):
     fallback_attempts = Column(Integer, default=0, nullable=False)
     max_fallback_attempts = Column(Integer, default=2, nullable=False)
 
-    created_at = Column(DateTime(timezone=True), default=get_utc_now, nullable=False)
+    created_at = Column(DateTime(timezone=True), default=get_utc_now, nullable=False, index=True)
     updated_at = Column(DateTime(timezone=True), default=get_utc_now, onupdate=get_utc_now, nullable=False)
     completed_at = Column(DateTime(timezone=True), nullable=True)
 
@@ -331,7 +337,8 @@ class PaymentInvoice(Base):
 
     deposit_address = Column(String(100), nullable=True)
     unique_amount = Column(Numeric(18, 8), nullable=True, index=True)
-    tx_hash = Column(String(100), nullable=True, index=True)
+    # Nullable unique: PostgreSQL/SQLite allow multiple NULLs; non-null tx hashes are unique
+    tx_hash = Column(String(100), nullable=True, unique=True, index=True)
     block_number = Column(BigInteger, nullable=True)
     confirmations = Column(Integer, default=0, nullable=False)
 

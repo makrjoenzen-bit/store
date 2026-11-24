@@ -7,12 +7,11 @@ from __future__ import annotations
 import asyncio
 import time
 from decimal import Decimal
-from typing import Set
-
 from loguru import logger
 
 from src.config import settings
 from src.core.database import AsyncSessionLocal
+from src.core.dedup import TxDeduper
 from src.core.models.enums import PaymentMethod
 from src.core.resilience import sleep_backoff
 from src.core.services.payment_verification import payment_verification_service
@@ -21,7 +20,7 @@ from src.outgest.binance_pay_reader import binance_pay_reader
 
 class BinancePayListenerWorker:
     def __init__(self):
-        self._seen: Set[str] = set()
+        self._dedup = TxDeduper("binance_pay")
         self.poll_seconds = float(getattr(settings, "BINANCE_PAY_POLL_SECONDS", 5) or 5)
         self._fail_streak = 0
 
@@ -58,11 +57,8 @@ class BinancePayListenerWorker:
 
     async def _process_row(self, row: dict):
         tx_id = row.get("transaction_id") or ""
-        if not tx_id or tx_id in self._seen:
+        if not tx_id or await self._dedup.seen_or_mark(tx_id):
             return
-        self._seen.add(tx_id)
-        if len(self._seen) > 5000:
-            self._seen = set(list(self._seen)[-2000:])
 
         if (row.get("currency") or "USDT").upper() not in ("USDT", "USD"):
             return

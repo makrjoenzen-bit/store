@@ -1,4 +1,5 @@
 import json
+import time
 from typing import Callable, Dict, Any, Awaitable, Optional, List, Tuple
 from aiogram import BaseMiddleware, Bot
 from aiogram.types import TelegramObject, Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton
@@ -7,8 +8,13 @@ from loguru import logger
 
 from src.core.redis import event_bus
 from src.core.database import AsyncSessionLocal
-from src.core.models.entities import BotConfig
+from src.core.models.entities import BotConfig, Customer
 from src.config import settings
+
+
+# Throttle channel-health alerts (per channel) — seconds
+_CHANNEL_ALERT_COOLDOWN = 300
+_last_channel_alert: Dict[str, float] = {}
 
 
 async def get_config_val(key: str, default_val: Any = None) -> Any:
@@ -64,6 +70,74 @@ def force_sub_keyboard(
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 
 
+async def _resolve_user_lang(user_id: int, telegram_lang: Optional[str] = None) -> str:
+    """Prefer stored customer.language_code; fall back to Telegram language then ar."""
+    from src.bot.i18n import normalize_lang
+    try:
+        async with AsyncSessionLocal() as session:
+            row = (
+                await session.execute(
+                    select(Customer.language_code).where(Customer.telegram_id == user_id)
+                )
+            ).scalar_one_or_none()
+            if row:
+                return normalize_lang(row)
+    except Exception:
+        pass
+    return normalize_lang(telegram_lang or "ar")
+
+
+async def _emit_channel_health_alert(channel_id: Any, error: Exception) -> None:
+    """Throttled alert when get_chat_member fails (bot not admin / bad channel id)."""
+    key = str(channel_id or "unknown")
+    now = time.time()
+    last = _last_channel_alert.get(key, 0)
+    if now - last < _CHANNEL_ALERT_COOLDOWN:
+        return
+    _last_channel_alert[key] = now
+
+    err_s = str(error)
+    logger.error(
+        f"Force-join channel health degraded for {channel_id}: {err_s}"
+    )
+    # Persist status for Admin Bot / Dashboard settings
+    try:
+        async with AsyncSessionLocal() as session:
+            status_key = "force_sub_channel_health"
+            payload = {
+                "channel_id": key,
+                "ok": False,
+                "error": err_s[:300],
+                "checked_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+            }
+            row = (
+                await session.execute(select(BotConfig).where(BotConfig.key == status_key))
+            ).scalar_one_or_none()
+            if row:
+                row.value = payload
+            else:
+                session.add(BotConfig(key=status_key, value=payload, updated_by="force_sub"))
+            await session.commit()
+        await event_bus.invalidate_bot_config_caches()
+    except Exception as e:
+        logger.warning(f"Could not persist channel health: {e}")
+
+    try:
+        await event_bus.publish_alert(
+            title="Force-Join Channel Health",
+            message=(
+                f"get_chat_member failed for channel `{key}`.\n"
+                f"Likely causes: bot is not admin, or channel ID is invalid.\n"
+                f"Error: {err_s[:200]}\n"
+                f"Users are fail-open (not locked out) until this is fixed."
+            ),
+            level="danger",
+            meta={"alert_type": "force_sub_channel", "channel_id": key},
+        )
+    except Exception as e:
+        logger.warning(f"Channel health alert publish failed: {e}")
+
+
 class ForceSubscribeMiddleware(BaseMiddleware):
     """
     Mandatory Channel Subscription Gate for Main + optional Proof/Trust channel.
@@ -81,6 +155,7 @@ class ForceSubscribeMiddleware(BaseMiddleware):
             return member.status in self.VALID_STATUSES
         except Exception as e:
             logger.warning(f"Could not verify membership for {user_id} in {channel_id}: {e}")
+            await _emit_channel_health_alert(channel_id, e)
             return None
 
     async def __call__(
@@ -171,23 +246,25 @@ class ForceSubscribeMiddleware(BaseMiddleware):
 
         from html import escape as html_escape
         from src.bot.i18n import t
+
+        lang = await _resolve_user_lang(user_id, getattr(user, "language_code", None))
         gate_text = (
-            f"{t('ar', 'force_sub_title')}\n\n"
+            f"{t(lang, 'force_sub_title')}\n\n"
             f"👋 {html_escape(user.first_name or '')}\n"
-            f"{t('ar', 'force_sub_verify')}"
+            f"{t(lang, 'force_sub_verify')}"
         )
         kb = force_sub_keyboard(
             main_url=main_channel_url,
             proof_url=proof_channel_url,
             need_main=need_main and not main_ok,
             need_proof=need_proof and not proof_ok,
-            language="ar",
+            language=lang,
         )
 
         if isinstance(event, Message):
             await event.answer(gate_text, parse_mode="HTML", reply_markup=kb)
         elif isinstance(event, CallbackQuery):
-            await event.answer(t("ar", "force_sub_fail"), show_alert=True)
+            await event.answer(t(lang, "force_sub_fail"), show_alert=True)
             try:
                 await event.message.edit_text(gate_text, parse_mode="HTML", reply_markup=kb)
             except Exception:

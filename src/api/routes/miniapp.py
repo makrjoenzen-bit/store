@@ -118,10 +118,11 @@ async def get_current_miniapp_customer(
     session: AsyncSession = Depends(get_db)
 ) -> Customer:
     """
-    Authenticates Mini App user via X-Telegram-Init-Data header or query param.
+    Authenticates Mini App user via X-Telegram-Init-Data header only
+    (never via query string — avoids leaking initData in URLs/logs).
     Fallback for localhost/dev: X-Dev-Telegram-Id header when ENVIRONMENT=development.
     """
-    init_data = request.headers.get("X-Telegram-Init-Data") or request.query_params.get("initData")
+    init_data = request.headers.get("X-Telegram-Init-Data")
     dev_tg_id = request.headers.get("X-Dev-Telegram-Id")
 
     tg_user = None
@@ -244,6 +245,27 @@ async def get_miniapp_profile(
     main_url_cfg = (await session.execute(select(BotConfig.value).where(BotConfig.key == "main_channel_url"))).scalar_one_or_none()
     proof_url_cfg = (await session.execute(select(BotConfig.value).where(BotConfig.key == "proof_channel_url"))).scalar_one_or_none()
 
+    async def _rail_on(key: str, default: bool = True) -> bool:
+        val = (
+            await session.execute(select(BotConfig.value).where(BotConfig.key == key))
+        ).scalar_one_or_none()
+        if val is None:
+            return default
+        if isinstance(val, bool):
+            return val
+        return str(val).lower() in ("true", "1", "yes", "on")
+
+    rails = {
+        "sham_cash": await _rail_on("pay_sham_cash_enabled", True),
+        "usdt_bep20": await _rail_on("pay_usdt_enabled", True) and bool(
+            (settings.HOT_WALLET_ADDRESS or "").strip()
+        ),
+        "usdt_trc20": await _rail_on("pay_usdt_enabled", True) and bool(
+            (settings.TRON_HOT_WALLET_ADDRESS or "").strip()
+        ),
+        "binance_pay": await _rail_on("pay_binance_enabled", True),
+    }
+
     # Calculate next VIP tier target
     spent = float(customer.total_spent or 0)
     next_tier = None
@@ -294,6 +316,7 @@ async def get_miniapp_profile(
             "proof_channel_url": proof_url_cfg or settings.TELEGRAM_PROOF_CHANNEL_URL,
             "admin_telegram_id": settings.ADMIN_TELEGRAM_ID,
             "bot_username": bot_username,
+            "payment_rails": rails,
         }
     }
 

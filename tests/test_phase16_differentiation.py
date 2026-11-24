@@ -36,7 +36,8 @@ def test_duplicate_receipt_fraud_banner():
     assert sham_cash_service.fraud_banner(None) is None
     assert "receipt_file_sha256" in _read("src/core/models/entities.py")
     assert "find_duplicate_receipt" in _read("src/core/services/sham_cash_service.py")
-    assert "fraud_warning" in _read("dashboard/app/sham-cash/page.tsx")
+    assert "fraud_warning" in _read("src/admin_bot/handlers/live_feed.py")
+    assert "fraud_warning" in _read("src/core/services/sham_cash_service.py")
 
 
 # ---------- 2. Staff RBAC + claim lock + dual approve ----------

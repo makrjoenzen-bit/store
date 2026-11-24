@@ -20,7 +20,10 @@ class GenericRESTAdapter(SupplierAdapter):
 
     def __init__(self, config: Dict[str, Any]):
         super().__init__(config)
-        self.base_url = config.get("base_url", "").rstrip("/")
+        from src.core.ssrf import validate_outbound_url
+
+        raw_base = (config.get("base_url") or "").rstrip("/")
+        self.base_url = validate_outbound_url(raw_base) if raw_base else ""
         self.headers = config.get("headers", {})
         self.api_key = config.get("api_key")
         self.api_key_header = config.get("api_key_header", "Authorization")
@@ -39,9 +42,13 @@ class GenericRESTAdapter(SupplierAdapter):
             h[self.api_key_header] = f"{self.api_key_prefix}{self.api_key}".strip()
         return h
 
+    def _safe_url(self, path: str) -> str:
+        from src.core.ssrf import validate_outbound_url
+        return validate_outbound_url(f"{self.base_url}{path}")
+
     async def check_health(self) -> HealthStatusDTO:
         start_time = time.perf_counter()
-        url = f"{self.base_url}{self.balance_endpoint or self.products_endpoint}"
+        url = self._safe_url(self.balance_endpoint or self.products_endpoint)
         try:
             async with httpx.AsyncClient(timeout=self.timeout) as client:
                 res = await client.get(url, headers=self._get_headers())
@@ -72,7 +79,7 @@ class GenericRESTAdapter(SupplierAdapter):
             )
 
     async def fetch_products(self) -> List[SupplierProductDTO]:
-        url = f"{self.base_url}{self.products_endpoint}"
+        url = self._safe_url(self.products_endpoint)
         async with httpx.AsyncClient(timeout=self.timeout) as client:
             res = await client.get(url, headers=self._get_headers())
             res.raise_for_status()
@@ -136,7 +143,7 @@ class GenericRESTAdapter(SupplierAdapter):
         idempotency_key: str,
         **kwargs,
     ) -> SupplierOrderResultDTO:
-        url = f"{self.base_url}{self.orders_endpoint}"
+        url = self._safe_url(self.orders_endpoint)
         payload = {
             "product_id": supplier_product_id,
             "quantity": quantity,
@@ -183,7 +190,7 @@ class GenericRESTAdapter(SupplierAdapter):
             )
 
     async def lookup_order(self, idempotency_key: str) -> SupplierOrderResultDTO:
-        url = f"{self.base_url}{self.orders_endpoint}"
+        url = self._safe_url(self.orders_endpoint)
         try:
             async with httpx.AsyncClient(timeout=self.timeout) as client:
                 res = await client.get(url, params={"idempotency_key": idempotency_key}, headers=self._get_headers())

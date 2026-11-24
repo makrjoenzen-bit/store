@@ -391,21 +391,3 @@ def order_rating_keyboard(order_id: str) -> InlineKeyboardMarkup:
         ]
     )
 
-
-def admin_sham_cash_review_keyboard(order_id: str) -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(
-        inline_keyboard=[
-            [
-                InlineKeyboardButton(
-                    text="✅ تأكيد الدفع وتسليم المنتج",
-                    callback_data=f"adm_appr:{order_id}",
-                ),
-            ],
-            [
-                InlineKeyboardButton(
-                    text="❌ رفض الطلب",
-                    callback_data=f"adm_rej:{order_id}",
-                ),
-            ],
-        ]
-    )

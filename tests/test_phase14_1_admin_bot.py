@@ -56,9 +56,11 @@ STRANGER_TG = 555555
 
 @pytest_asyncio.fixture(autouse=True)
 async def setup_db():
-    # Reload whitelist from env into settings object
+    # Reload whitelist from env into settings object (clear owner/staff so set size is exact)
     settings.ADMIN_TELEGRAM_IDS = "900001,900002"
     settings.ADMIN_TELEGRAM_ID = 900001
+    settings.OWNER_TELEGRAM_IDS = ""
+    settings.STAFF_TELEGRAM_IDS = ""
     settings.ADMIN_BOT_TOKEN = "222:ADMIN_BOT_TOKEN"
 
     event_bus.redis = fakeredis.aioredis.FakeRedis(decode_responses=True)
@@ -282,7 +284,7 @@ async def test_03_sham_cash_approve_updates_db_jit_notify_audit():
         assert order.invoice.status == InvoiceStatus.CONFIRMED
 
         audits = (await session.execute(
-            select(AuditLog).where(AuditLog.action == "sham_cash_approve")
+            select(AuditLog).where(AuditLog.action.in_(("sham_cash_approve", "sham_cash_approve_api")))
         )).scalars().all()
         assert len(audits) >= 1
         assert audits[-1].new_values.get("state") == "payment_confirmed"
@@ -353,11 +355,16 @@ async def test_05_live_feed_formats_sham_review_and_broadcasts():
     text, kb = render_live_event("orders:live", payload)
     assert text and "شام كاش" in text
     assert kb is not None
-    # Keyboard has approve + reject
+    # Initial card is claim-lock; approve/reject unlock after claim
     rows = kb.inline_keyboard
     flat = [btn.callback_data for row in rows for btn in row]
-    assert any(c.startswith("adm_sc_ok:") for c in flat)
-    assert any(c.startswith("adm_sc_no:") for c in flat)
+    assert any(c.startswith("adm:claim:") for c in flat)
+    claimed_kb = sham_cash_review_keyboard(
+        payload["order_id"], claimed=True, for_claimer=True
+    )
+    claimed_flat = [btn.callback_data for row in claimed_kb.inline_keyboard for btn in row]
+    assert any(c.startswith("adm_sc_ok:") for c in claimed_flat)
+    assert any(c.startswith("adm_sc_no:") for c in claimed_flat)
 
     alert_text, _ = render_live_event("alerts:stream", {
         "title": "Hot Wallet Low",
@@ -370,8 +377,10 @@ async def test_05_live_feed_formats_sham_review_and_broadcasts():
     bot = MagicMock()
     bot.send_message = AsyncMock()
     n = await broadcast_to_admins(bot, "اختبار تنبيه إداري")
-    assert n == 2  # 900001 and 900002
-    assert bot.send_message.await_count == 2
+    assert {900001, 900002}.issubset(settings.admin_telegram_id_set)
+    assert n == len(settings.admin_telegram_id_set)
+    assert n >= 2
+    assert bot.send_message.await_count == n
     print("✓ Live feed formats Sham card + broadcasts to all ADMIN_TELEGRAM_IDS")
 
 

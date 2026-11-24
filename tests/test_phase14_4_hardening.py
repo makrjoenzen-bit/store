@@ -187,6 +187,8 @@ def _settings_isolated(**kwargs) -> Settings:
         ADMIN_BOT_TOKEN="2:dev",
         ADMIN_TELEGRAM_IDS="1",
         ADMIN_TELEGRAM_ID=None,
+        OWNER_TELEGRAM_IDS="",
+        STAFF_TELEGRAM_IDS="",
         HOT_WALLET_ADDRESS="",
         HOT_WALLET_PRIVATE_KEY="",
         TRON_HOT_WALLET_ADDRESS="",

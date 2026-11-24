@@ -8,22 +8,40 @@ from jose import jwt, JWTError
 from src.config import settings
 
 
+def _is_test_runtime() -> bool:
+    import os
+    import sys
+    env = (settings.ENVIRONMENT or "").strip().lower()
+    if env in ("test", "testing"):
+        return True
+    if os.environ.get("PYTEST_CURRENT_TEST"):
+        return True
+    return "pytest" in sys.modules
+
+
 def get_fernet_cipher() -> Fernet:
-    """Returns Fernet cipher instance using settings.ENCRYPTION_MASTER_KEY."""
+    """Returns Fernet cipher from ENCRYPTION_MASTER_KEY — never silently falls back."""
+    import hashlib
+
+    raw = (settings.ENCRYPTION_MASTER_KEY or "").strip()
+    if not raw:
+        if _is_test_runtime():
+            raw = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
+        else:
+            raise RuntimeError(
+                "ENCRYPTION_MASTER_KEY is missing. Set a valid Fernet key before starting."
+            )
     try:
-        key = settings.ENCRYPTION_MASTER_KEY.encode()
-        # If it's not 32 url-safe base64-encoded bytes, pad/hash or ensure valid
+        key = raw.encode()
+        # If it's not 32 url-safe base64-encoded bytes, derive a stable Fernet key
         if len(key) != 44:
-            # Generate deterministic 32-byte key from sha256
-            import hashlib
             h = hashlib.sha256(key).digest()
             key = base64.urlsafe_b64encode(h)
         return Fernet(key)
-    except Exception:
-        # Fallback to deterministic key
-        import hashlib
-        h = hashlib.sha256(b"default_reseller_master_key_fallback_seed").digest()
-        return Fernet(base64.urlsafe_b64encode(h))
+    except Exception as e:
+        raise RuntimeError(
+            f"ENCRYPTION_MASTER_KEY is invalid and cannot initialize Fernet: {e}"
+        ) from e
 
 
 def encrypt_secret(raw_text: str) -> bytes:

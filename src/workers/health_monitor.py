@@ -32,6 +32,9 @@ class SupplierHealthMonitor:
                 self._loop_count += 1
                 await self.check_all_suppliers()
                 await self.send_abandoned_checkout_reminders()
+                # ~ every 60s (every other 30s tick): expire unpaid invoices / refund holds
+                if self._loop_count % 2 == 0:
+                    await self.sweep_expired_orders()
                 # ~ every 1h (120 * 30s): renewal reminders
                 if self._loop_count % 120 == 0:
                     await self.send_subscription_renewal_reminders()
@@ -156,6 +159,18 @@ class SupplierHealthMonitor:
                     logger.info(f"Sent {n} subscription renewal reminders")
         except Exception as e:
             logger.warning(f"Renewal reminder pass failed: {e}")
+
+    async def sweep_expired_orders(self):
+        """Cancel unpaid / timed-out invoices; refund wallet holds; release stock."""
+        try:
+            from src.core.services.order_expiry_service import order_expiry_service
+            async with AsyncSessionLocal() as session:
+                result = await order_expiry_service.sweep_expired(session)
+                n = int(result.get("expired_count") or 0)
+                if n:
+                    logger.info(f"Order expiry sweeper: expired {n} unpaid order(s)")
+        except Exception as e:
+            logger.error(f"Order expiry sweeper failed: {e}")
 
     async def send_abandoned_checkout_reminders(self):
         """ONE Arabic reminder at CHECKOUT_REMINDER_MINUTES with pay/cancel buttons."""

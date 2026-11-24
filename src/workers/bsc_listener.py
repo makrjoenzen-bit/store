@@ -23,17 +23,40 @@ class BscListenerWorker:
 
     def __init__(self):
         self.w3 = AsyncWeb3(AsyncHTTPProvider(settings.BSC_RPC_URL))
-        self.usdt_address = AsyncWeb3.to_checksum_address(settings.USDT_BEP20_CONTRACT_ADDRESS)
-        self.hot_wallet = (
-            AsyncWeb3.to_checksum_address(settings.HOT_WALLET_ADDRESS)
-            if settings.HOT_WALLET_ADDRESS
-            else None
-        )
-        self.contract = self.w3.eth.contract(address=self.usdt_address, abi=BEP20_MIN_ABI)
+        self.usdt_address = None
+        self.contract = None
+        self.hot_wallet = None
         self.last_scanned_block = None
         self._fail_streak = 0
+        self._disabled_reason = None
+
+        contract_raw = (settings.USDT_BEP20_CONTRACT_ADDRESS or "").strip()
+        try:
+            if not contract_raw or len(contract_raw) < 10:
+                raise ValueError("USDT_BEP20_CONTRACT_ADDRESS missing or too short")
+            self.usdt_address = AsyncWeb3.to_checksum_address(contract_raw)
+            self.contract = self.w3.eth.contract(address=self.usdt_address, abi=BEP20_MIN_ABI)
+        except Exception as e:
+            self._disabled_reason = f"Invalid USDT_BEP20_CONTRACT_ADDRESS: {e}"
+            logger.warning(f"BSC listener disabled at init — {self._disabled_reason}")
+
+        try:
+            if settings.HOT_WALLET_ADDRESS:
+                self.hot_wallet = AsyncWeb3.to_checksum_address(settings.HOT_WALLET_ADDRESS)
+        except Exception as e:
+            self._disabled_reason = f"Invalid HOT_WALLET_ADDRESS: {e}"
+            logger.warning(f"BSC listener disabled at init — {self._disabled_reason}")
+            self.hot_wallet = None
 
     async def run(self):
+        if self._disabled_reason or not self.contract or not self.usdt_address:
+            logger.warning(
+                f"BSC listener idling (misconfigured contract). reason={self._disabled_reason}"
+            )
+            while True:
+                await asyncio.sleep(3600)
+            return
+
         if not self.hot_wallet:
             logger.warning("HOT_WALLET_ADDRESS not configured. BSC listener idling.")
             return

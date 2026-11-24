@@ -85,8 +85,31 @@ class PaymentVerificationService:
         trigger_source: str,
         sync_wallet_address: Optional[str] = None,
     ) -> Dict[str, Any]:
-        """Confirm PENDING invoice → PAYMENT_CONFIRMED + enqueue JIT."""
+        """Confirm PENDING invoice → PAYMENT_CONFIRMED + enqueue JIT (row-locked)."""
         now = datetime.now(timezone.utc)
+        # Re-load with FOR UPDATE to serialize concurrent confirmations on the same invoice
+        locked = (await session.execute(
+            select(PaymentInvoice)
+            .where(PaymentInvoice.id == invoice.id)
+            .options(
+                selectinload(PaymentInvoice.order).selectinload(Order.master_product),
+                selectinload(PaymentInvoice.customer),
+            )
+            .with_for_update()
+        )).scalar_one_or_none()
+        if not locked:
+            raise ValueError("Invoice not found")
+        if locked.status == InvoiceStatus.CONFIRMED:
+            order = locked.order
+            return {
+                "status": "already_confirmed",
+                "order_id": str(order.id) if order else None,
+                "order_number": order.order_number if order else None,
+            }
+        if tx_ref and await self.is_tx_already_processed(session, tx_ref):
+            raise ValueError(f"Transaction already processed: {tx_ref}")
+
+        invoice = locked
         order = invoice.order
         invoice.status = InvoiceStatus.CONFIRMED
         invoice.amount_received = amount

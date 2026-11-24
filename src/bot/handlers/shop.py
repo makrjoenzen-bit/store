@@ -25,7 +25,7 @@ from src.core.adapters.registry import AdapterRegistry
 from src.core.redis import event_bus
 from src.bot.keyboards.inline import (
     main_menu_keyboard, categories_keyboard, products_keyboard,
-    product_detail_keyboard, payment_methods_keyboard, admin_sham_cash_review_keyboard,
+    product_detail_keyboard, payment_methods_keyboard,
     quantity_selector_keyboard, split_payment_methods_keyboard,
     paginated_products_keyboard, topup_presets_keyboard, topup_methods_keyboard,
     order_rating_keyboard, cancel_fsm_keyboard,
@@ -1351,6 +1351,17 @@ async def _reserve_split_and_set_crypto(
     method: PaymentMethod,
     deposit_address: str,
 ):
+    # Idempotent: double-tap pay:split_* must never double-debit
+    already = Decimal(str(order.wallet_portion_reserved or 0))
+    if already > 0:
+        invoice = order.invoice
+        remainder = Decimal(str(invoice.amount_expected or (order.our_price - already)))
+        if invoice:
+            invoice.deposit_address = deposit_address or invoice.deposit_address
+            invoice.payment_method = method
+            await session.commit()
+        return already, remainder, invoice
+
     wallet_portion = min(customer.wallet_balance, order.our_price)
     remainder = order.our_price - wallet_portion
     if wallet_portion > 0:
@@ -2000,6 +2011,24 @@ async def handle_receipt_pdf(message: Message, state: FSMContext):
     )
 
 
+@router.message(ShamCashUploadState.waiting_for_receipt)
+async def handle_receipt_non_photo(message: Message, state: FSMContext):
+    """Keep FSM; do not fall through to AI concierge on text/stickers/etc."""
+    from src.bot.i18n import normalize_lang
+    from src.bot.keyboards.inline import cancel_fsm_keyboard
+
+    lang = "ar"
+    async with AsyncSessionLocal() as session:
+        cust = await get_or_create_customer(session, message.from_user)
+        lang = normalize_lang(cust.language_code)
+    text = (
+        "Please send a photo of your transfer receipt only (or tap Cancel)."
+        if lang == "en"
+        else "يرجى إرسال صورة إيصال التحويل فقط (أو اضغط إلغاء)."
+    )
+    await message.answer(text, reply_markup=cancel_fsm_keyboard())
+
+
 # ---------------- Binance Pay Order ID + payment help guides ----------------
 @router.callback_query(F.data.startswith("binance_oid:"))
 async def cb_binance_oid_prompt(callback: CallbackQuery, state: FSMContext):
@@ -2183,89 +2212,8 @@ async def cb_cancel_pending_order(callback: CallbackQuery):
             await callback.answer("لا يمكن إلغاء هذا الطلب أو أنه تم تنفيذه مسبقاً.", show_alert=True)
 
 
-# ---------------- Admin Telegram Review Callbacks ----------------
-@router.callback_query(F.data.startswith("adm_appr:"))
-async def admin_approve_sham_cash(callback: CallbackQuery):
-    if not _is_telegram_admin(callback.from_user.id):
-        await callback.answer("غير مصرح لك بتنفيذ هذا الإجراء.", show_alert=True)
-        return
-    order_id = callback.data.split(":")[1]
-    async with AsyncSessionLocal() as session:
-        stmt = select(Order).where(Order.id == _as_uuid(order_id)).options(selectinload(Order.invoice))
-        order = (await session.execute(stmt)).scalar_one_or_none()
-        if not order:
-            await callback.answer("الطلب غير موجود", show_alert=True)
-            return
-
-        if order.invoice:
-            order.invoice.status = InvoiceStatus.CONFIRMED
-
-        await order_service.transition_order_state(
-            session, order, OrderState.PAYMENT_CONFIRMED, "admin_telegram_approval"
-        )
-        await session.commit()
-
-        # Reload customer for notification
-        cust_stmt = select(Order).where(Order.id == _as_uuid(order_id)).options(selectinload(Order.customer))
-        order_full = (await session.execute(cust_stmt)).scalar_one_or_none()
-        if order_full and order_full.customer and order_full.customer.telegram_id:
-            from src.core.redis import event_bus
-            await event_bus.publish("bot:send_message", {
-                "telegram_id": order_full.customer.telegram_id,
-                "text": (
-                    f"⚡ تم تأكيد الدفع — جاري تأمين وتسليم منتجك الآن...\n\n"
-                    f"🔖 رقم الطلب: `{order.order_number}`"
-                ),
-            })
-
-        await enqueue_jit_order(order_id)
-
-        await callback.message.edit_caption(
-            caption=f"✅ تمت الموافقة على الطلب `{order.order_number}` وجاري التوريد آلياً!",
-            parse_mode="HTML"
-        )
-
-
-@router.callback_query(F.data.startswith("adm_rej:"))
-async def admin_reject_sham_cash(callback: CallbackQuery):
-    if not _is_telegram_admin(callback.from_user.id):
-        await callback.answer("غير مصرح لك بتنفيذ هذا الإجراء.", show_alert=True)
-        return
-    order_id = callback.data.split(":")[1]
-    async with AsyncSessionLocal() as session:
-        stmt = (
-            select(Order)
-            .where(Order.id == _as_uuid(order_id))
-            .options(selectinload(Order.invoice), selectinload(Order.customer))
-        )
-        order = (await session.execute(stmt)).scalar_one_or_none()
-        if not order:
-            await callback.answer("الطلب غير موجود أو تم حذفه.", show_alert=True)
-            return
-        if order.invoice:
-            order.invoice.status = InvoiceStatus.REJECTED
-
-        reject_reason = "إيصال غير صالح أو لم يتم استلام الدفع"
-        await order_service.transition_order_state(
-            session, order, OrderState.REJECTED, f"admin_telegram_rejected: {reject_reason}"
-        )
-        await session.commit()
-
-        if order.customer and order.customer.telegram_id:
-            from src.core.redis import event_bus
-            await event_bus.publish("bot:send_message", {
-                "telegram_id": order.customer.telegram_id,
-                "text": (
-                    f"❌ تم رفض العملية\n\n"
-                    f"🔖 الطلب: `{order.order_number}`\n"
-                    f"📝 السبب: {reject_reason}"
-                ),
-            })
-
-        await callback.message.edit_caption(
-            caption=f"❌ تم رفض إيصال الطلب `{order.order_number}`.",
-            parse_mode="HTML"
-        )
+# Admin Sham Cash approve/reject lives ONLY on Admin Bot
+# (adm:claim: / adm_sc_ok: / adm_sc_no: via sham_cash_review_keyboard).
 
 
 # =========================================================================

@@ -6,10 +6,10 @@ import asyncio
 from aiogram import Bot, Dispatcher
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
-from aiogram.fsm.storage.memory import MemoryStorage
 from loguru import logger
 
 from src.config import settings, validate_production_secrets
+from src.bot.fsm_storage import build_fsm_storage
 from src.admin_bot.middlewares.admin_acl import AdminAclMiddleware
 from src.admin_bot.handlers import (
     hub, treasury, orders, binance_pay,
@@ -33,7 +33,7 @@ async def main():
         token=settings.ADMIN_BOT_TOKEN,
         default=DefaultBotProperties(parse_mode=ParseMode.HTML),
     )
-    dp = Dispatcher(storage=MemoryStorage())
+    dp = Dispatcher(storage=build_fsm_storage())
 
     # Strict ACL on every update
     dp.message.middleware(AdminAclMiddleware())

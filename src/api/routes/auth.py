@@ -25,6 +25,86 @@ oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/api/auth/login", auto_error=Fals
 
 COOKIE_NAME = getattr(settings, "AUTH_COOKIE_NAME", None) or "access_token"
 
+# Login brute-force guard: 5 failures / IP / 60s
+_LOGIN_FAIL_LIMIT = 5
+_LOGIN_FAIL_WINDOW = 60
+_login_fail_memory: dict[str, list[float]] = {}
+
+
+def _client_ip(request: Request) -> str:
+    forwarded = (request.headers.get("x-forwarded-for") or "").split(",")[0].strip()
+    if forwarded:
+        return forwarded
+    if request.client and request.client.host:
+        return request.client.host
+    return "unknown"
+
+
+async def _enforce_login_rate_limit(request: Request) -> None:
+    """Raise 429 after too many recent failures for this IP (Redis, memory fallback)."""
+    import time
+
+    ip = _client_ip(request)
+    key = f"auth:login:fail:{ip}"
+    try:
+        from src.core.redis import event_bus
+        redis = event_bus._redis
+        if redis is not None:
+            count = int(await redis.get(key) or 0)
+            if count >= _LOGIN_FAIL_LIMIT:
+                raise HTTPException(
+                    status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+                    detail="Too many login attempts. Try again in a minute.",
+                )
+            return
+    except HTTPException:
+        raise
+    except Exception:
+        pass
+
+    now = time.time()
+    bucket = [t for t in _login_fail_memory.get(ip, []) if now - t < _LOGIN_FAIL_WINDOW]
+    _login_fail_memory[ip] = bucket
+    if len(bucket) >= _LOGIN_FAIL_LIMIT:
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail="Too many login attempts. Try again in a minute.",
+        )
+
+
+async def _record_login_failure(request: Request) -> None:
+    import time
+
+    ip = _client_ip(request)
+    key = f"auth:login:fail:{ip}"
+    try:
+        from src.core.redis import event_bus
+        redis = event_bus._redis
+        if redis is not None:
+            count = await redis.incr(key)
+            if int(count) == 1:
+                await redis.expire(key, _LOGIN_FAIL_WINDOW)
+            return
+    except Exception:
+        pass
+    now = time.time()
+    bucket = [t for t in _login_fail_memory.get(ip, []) if now - t < _LOGIN_FAIL_WINDOW]
+    bucket.append(now)
+    _login_fail_memory[ip] = bucket
+
+
+async def _clear_login_failures(request: Request) -> None:
+    ip = _client_ip(request)
+    key = f"auth:login:fail:{ip}"
+    try:
+        from src.core.redis import event_bus
+        redis = event_bus._redis
+        if redis is not None:
+            await redis.delete(key)
+    except Exception:
+        pass
+    _login_fail_memory.pop(ip, None)
+
 
 class TokenResponse(BaseModel):
     access_token: str
@@ -172,11 +252,19 @@ def _issue_token(admin: AdminUser) -> str:
 
 @router.post("/login", response_model=TokenResponse)
 async def login(
+    request: Request,
     response: Response,
     form_data: OAuth2PasswordRequestForm = Depends(),
     session: AsyncSession = Depends(get_db),
 ):
-    admin = await _authenticate(session, form_data.username, form_data.password)
+    await _enforce_login_rate_limit(request)
+    try:
+        admin = await _authenticate(session, form_data.username, form_data.password)
+    except HTTPException as e:
+        if e.status_code == status.HTTP_401_UNAUTHORIZED:
+            await _record_login_failure(request)
+        raise
+    await _clear_login_failures(request)
     token = _issue_token(admin)
     _set_auth_cookie(response, token)
     return TokenResponse(
@@ -188,11 +276,19 @@ async def login(
 
 @router.post("/login/json", response_model=TokenResponse)
 async def login_json(
+    request: Request,
     body: LoginJSON,
     response: Response,
     session: AsyncSession = Depends(get_db),
 ):
-    admin = await _authenticate(session, body.username, body.password)
+    await _enforce_login_rate_limit(request)
+    try:
+        admin = await _authenticate(session, body.username, body.password)
+    except HTTPException as e:
+        if e.status_code == status.HTTP_401_UNAUTHORIZED:
+            await _record_login_failure(request)
+        raise
+    await _clear_login_failures(request)
     token = _issue_token(admin)
     _set_auth_cookie(response, token)
     return TokenResponse(

@@ -45,10 +45,10 @@ app = FastAPI(
     openapi_url="/api/openapi.json",
 )
 
-# CORS — credentials required for HttpOnly auth cookie
+# CORS — explicit allowlist (credentials + "*" is invalid / unsafe)
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=settings.cors_origins_list,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -74,11 +74,23 @@ app.include_router(reseller_api.router)
 
 @app.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket):
-    """Real-time streaming socket for Dashboard live metrics and order updates."""
+    """Real-time streaming socket for Dashboard — requires admin JWT (cookie or ?token=)."""
+    from src.core.security import decode_access_token
+
+    cookie_name = getattr(settings, "AUTH_COOKIE_NAME", None) or "access_token"
+    token = (
+        websocket.cookies.get(cookie_name)
+        or websocket.query_params.get("token")
+        or websocket.query_params.get("access_token")
+    )
+    payload = decode_access_token(token) if token else None
+    if not payload or not payload.get("sub"):
+        await websocket.close(code=1008, reason="Unauthorized")
+        return
+
     await ws_manager.connect(websocket)
     try:
         while True:
-            # Keep socket alive and accept ping/pong
             data = await websocket.receive_text()
             if data == "ping":
                 await websocket.send_text("pong")

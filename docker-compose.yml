@@ -1,5 +1,9 @@
 version: "3.9"
 
+x-app-db: &app-db-env
+  DATABASE_URL: postgresql+asyncpg://postgres:${POSTGRES_PASSWORD:-change_me_db_password}@postgres:5432/aggregator_db
+  REDIS_URL: redis://redis:6379/0
+
 services:
   postgres:
     image: postgres:16-alpine
@@ -8,11 +12,11 @@ services:
     environment:
       POSTGRES_DB: aggregator_db
       POSTGRES_USER: postgres
-      POSTGRES_PASSWORD: postgres
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-change_me_db_password}
     volumes:
       - postgres_data:/var/lib/postgresql/data
-    ports:
-      - "5432:5432"
+    # No host ports — internal Docker network only
+    mem_limit: 512m
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U postgres"]
       interval: 5s
@@ -23,11 +27,11 @@ services:
     image: redis:7-alpine
     container_name: jit_redis
     restart: always
-    command: ["redis-server", "--appendonly", "yes"]
+    command: ["redis-server", "--appendonly", "yes", "--maxmemory", "128mb", "--maxmemory-policy", "allkeys-lru"]
     volumes:
       - redis_data:/data
-    ports:
-      - "6379:6379"
+    # No host ports — internal Docker network only
+    mem_limit: 192m
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 5s
@@ -41,15 +45,16 @@ services:
     command: ["uvicorn", "src.api.main:app", "--host", "0.0.0.0", "--port", "8000"]
     env_file: .env
     environment:
-      DATABASE_URL: postgresql+asyncpg://postgres:postgres@postgres:5432/aggregator_db
-      REDIS_URL: redis://redis:6379/0
+      <<: *app-db-env
     depends_on:
       postgres:
         condition: service_healthy
       redis:
         condition: service_healthy
+    # Bound only for local debug; production traffic goes via nginx:80
     ports:
       - "8000:8000"
+    mem_limit: 512m
 
   bot:
     build: .
@@ -58,13 +63,13 @@ services:
     command: ["python", "-m", "src.bot.bot_main"]
     env_file: .env
     environment:
-      DATABASE_URL: postgresql+asyncpg://postgres:postgres@postgres:5432/aggregator_db
-      REDIS_URL: redis://redis:6379/0
+      <<: *app-db-env
     depends_on:
       backend:
         condition: service_started
       redis:
         condition: service_healthy
+    mem_limit: 256m
 
   admin-bot:
     build: .
@@ -73,13 +78,13 @@ services:
     command: ["python", "-m", "src.admin_bot.bot_main"]
     env_file: .env
     environment:
-      DATABASE_URL: postgresql+asyncpg://postgres:postgres@postgres:5432/aggregator_db
-      REDIS_URL: redis://redis:6379/0
+      <<: *app-db-env
     depends_on:
       backend:
         condition: service_started
       redis:
         condition: service_healthy
+    mem_limit: 256m
 
   worker-jit:
     build: .
@@ -88,11 +93,11 @@ services:
     command: ["arq", "src.workers.jit_worker.WorkerSettings"]
     env_file: .env
     environment:
-      DATABASE_URL: postgresql+asyncpg://postgres:postgres@postgres:5432/aggregator_db
-      REDIS_URL: redis://redis:6379/0
+      <<: *app-db-env
     depends_on:
       backend:
         condition: service_started
+    mem_limit: 384m
 
   worker-bsc:
     build: .
@@ -101,11 +106,11 @@ services:
     command: ["python", "-m", "src.workers.bsc_listener"]
     env_file: .env
     environment:
-      DATABASE_URL: postgresql+asyncpg://postgres:postgres@postgres:5432/aggregator_db
-      REDIS_URL: redis://redis:6379/0
+      <<: *app-db-env
     depends_on:
       backend:
         condition: service_started
+    mem_limit: 192m
 
   worker-tron:
     build: .
@@ -114,11 +119,11 @@ services:
     command: ["python", "-m", "src.workers.tron_listener"]
     env_file: .env
     environment:
-      DATABASE_URL: postgresql+asyncpg://postgres:postgres@postgres:5432/aggregator_db
-      REDIS_URL: redis://redis:6379/0
+      <<: *app-db-env
     depends_on:
       backend:
         condition: service_started
+    mem_limit: 192m
 
   worker-binance-pay:
     build: .
@@ -127,11 +132,11 @@ services:
     command: ["python", "-m", "src.workers.binance_pay_listener"]
     env_file: .env
     environment:
-      DATABASE_URL: postgresql+asyncpg://postgres:postgres@postgres:5432/aggregator_db
-      REDIS_URL: redis://redis:6379/0
+      <<: *app-db-env
     depends_on:
       backend:
         condition: service_started
+    mem_limit: 192m
 
   worker-health:
     build: .
@@ -140,11 +145,11 @@ services:
     command: ["python", "-m", "src.workers.health_monitor"]
     env_file: .env
     environment:
-      DATABASE_URL: postgresql+asyncpg://postgres:postgres@postgres:5432/aggregator_db
-      REDIS_URL: redis://redis:6379/0
+      <<: *app-db-env
     depends_on:
       backend:
         condition: service_started
+    mem_limit: 192m
 
   worker-channel:
     build: .
@@ -153,11 +158,11 @@ services:
     command: ["python", "-m", "src.workers.channel_sync"]
     env_file: .env
     environment:
-      DATABASE_URL: postgresql+asyncpg://postgres:postgres@postgres:5432/aggregator_db
-      REDIS_URL: redis://redis:6379/0
+      <<: *app-db-env
     depends_on:
       backend:
         condition: service_started
+    mem_limit: 192m
 
   dashboard:
     build:
@@ -170,11 +175,11 @@ services:
     ports:
       - "3000:3000"
     environment:
-      # Server-side rewrite target only — browsers always use relative /api and /ws via Nginx
       BACKEND_INTERNAL_URL: http://backend:8000
     depends_on:
       backend:
         condition: service_started
+    mem_limit: 384m
 
   nginx:
     image: nginx:alpine
@@ -187,6 +192,7 @@ services:
     depends_on:
       - backend
       - dashboard
+    mem_limit: 64m
 
   worker-radar:
     build: .
@@ -195,11 +201,11 @@ services:
     command: ["python", "-m", "src.workers.radar_worker"]
     env_file: .env
     environment:
-      DATABASE_URL: postgresql+asyncpg://postgres:postgres@postgres:5432/aggregator_db
-      REDIS_URL: redis://redis:6379/0
+      <<: *app-db-env
     depends_on:
       backend:
         condition: service_started
+    mem_limit: 256m
 
   # Optional BI — start with: docker compose --profile bi up -d
   metabase:
@@ -217,6 +223,7 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+    mem_limit: 768m
 
 volumes:
   postgres_data:

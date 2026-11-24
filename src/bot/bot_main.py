@@ -6,10 +6,10 @@ from aiogram import Bot, Dispatcher
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
-from aiogram.fsm.storage.memory import MemoryStorage
 from loguru import logger
 
 from src.config import settings, validate_production_secrets
+from src.bot.fsm_storage import build_fsm_storage
 from src.bot.handlers import shop, support
 from src.bot.middlewares.rate_limit import AntiSpamRateLimitMiddleware
 from src.bot.middlewares.force_sub import ForceSubscribeMiddleware
@@ -284,7 +284,7 @@ async def main():
         token=settings.TELEGRAM_BOT_TOKEN,
         default=DefaultBotProperties(parse_mode=ParseMode.HTML),
     )
-    dp = Dispatcher(storage=MemoryStorage())
+    dp = Dispatcher(storage=build_fsm_storage())
 
     # Register anti-spam and uncompleted order quota middleware
     dp.message.middleware(AntiSpamRateLimitMiddleware())

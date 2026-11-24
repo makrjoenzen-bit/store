@@ -15,6 +15,7 @@ from src.core.security import encrypt_secret, decrypt_secret
 from src.core.adapters.registry import AdapterRegistry
 from src.api.routes.auth import get_current_admin
 from src.core.redis import event_bus
+from src.core.ssrf import UnsafeURLError, validate_supplier_config_urls
 
 router = APIRouter(prefix="/suppliers", tags=["Suppliers"])
 
@@ -135,7 +136,15 @@ async def create_supplier(
     admin: AdminUser = Depends(get_current_admin)
 ):
     # Auto-decode Lara conn_ codes + fill official base URLs
+    try:
+        validate_supplier_config_urls(dto.config or {})
+    except UnsafeURLError as e:
+        raise HTTPException(status_code=400, detail=f"Unsafe supplier base_url: {e}") from e
     normalized = AdapterRegistry.normalize_config(dto.driver_type, dto.config or {})
+    try:
+        validate_supplier_config_urls(normalized)
+    except UnsafeURLError as e:
+        raise HTTPException(status_code=400, detail=f"Unsafe supplier base_url: {e}") from e
     encrypted_config = encrypt_secret(json.dumps(normalized))
 
     supplier = Supplier(
@@ -208,7 +217,15 @@ async def update_supplier(
     if dto.notes is not None:
         supplier.notes = dto.notes
     if dto.config is not None:
+        try:
+            validate_supplier_config_urls(dto.config)
+        except UnsafeURLError as e:
+            raise HTTPException(status_code=400, detail=f"Unsafe supplier base_url: {e}") from e
         normalized = AdapterRegistry.normalize_config(supplier.driver_type, dto.config)
+        try:
+            validate_supplier_config_urls(normalized)
+        except UnsafeURLError as e:
+            raise HTTPException(status_code=400, detail=f"Unsafe supplier base_url: {e}") from e
         supplier.config_encrypted = encrypt_secret(json.dumps(normalized))
 
     await session.commit()

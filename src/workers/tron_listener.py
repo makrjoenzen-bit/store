@@ -7,13 +7,14 @@ from __future__ import annotations
 import asyncio
 from datetime import datetime, timezone
 from decimal import Decimal
-from typing import Optional, Set
+from typing import Optional
 
 import httpx
 from loguru import logger
 
 from src.config import settings
 from src.core.database import AsyncSessionLocal
+from src.core.dedup import TxDeduper
 from src.core.models.enums import PaymentMethod
 from src.core.resilience import sleep_backoff
 from src.core.services.payment_verification import payment_verification_service
@@ -25,7 +26,7 @@ class TronListenerWorker:
         self.contract = settings.USDT_TRC20_CONTRACT_ADDRESS
         self.rpc = (settings.TRON_RPC_URL or "https://api.trongrid.io").rstrip("/")
         self.api_key = settings.TRON_API_KEY
-        self._seen: Set[str] = set()
+        self._dedup = TxDeduper("tron_trc20")
         self._fingerprint: Optional[str] = None
         self._fail_streak = 0
 
@@ -74,12 +75,8 @@ class TronListenerWorker:
 
     async def _process_transfer(self, row: dict):
         tx_id = str(row.get("transaction_id") or row.get("txID") or "")
-        if not tx_id or tx_id in self._seen:
+        if not tx_id or await self._dedup.seen_or_mark(tx_id):
             return
-        self._seen.add(tx_id)
-        if len(self._seen) > 5000:
-            # trim
-            self._seen = set(list(self._seen)[-2000:])
 
         to_addr = (row.get("to") or "").strip()
         if to_addr and to_addr.lower() != self.hot_wallet.lower():

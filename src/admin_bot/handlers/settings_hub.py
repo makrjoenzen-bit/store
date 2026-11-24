@@ -103,11 +103,21 @@ async def _render_settings(target, *, edit: bool = False):
         }
         force_id = await _get_cfg(session, "main_channel_id", "—")
         force_url = await _get_cfg(session, "main_channel_url", "—")
+        channel_health = await _get_cfg(session, "force_sub_channel_health", None)
+    health_line = ""
+    if isinstance(channel_health, dict) and channel_health.get("ok") is False:
+        health_line = (
+            f"\n⚠️ <b>صحة قناة الإجبار:</b> خطأ على "
+            f"<code>{channel_health.get('channel_id')}</code>\n"
+            f"<i>{str(channel_health.get('error') or '')[:120]}</i>\n"
+            f"آخر فحص: {channel_health.get('checked_at') or '—'}\n"
+        )
     text = (
         "⚙️ <b>إعدادات البوت والقنوات</b>\n\n"
         f"شام كاش: <code>{sham_acc}</code>\n"
         f"قناة إجبارية: <code>{force_id}</code>\n"
-        f"رابط القناة: {force_url}\n\n"
+        f"رابط القناة: {force_url}\n"
+        f"{health_line}\n"
         "بدّل المفاتيح أو عدّل القيم أدناه — تُحفظ فوراً في قاعدة البيانات."
     )
     kb = _settings_kb(flags)

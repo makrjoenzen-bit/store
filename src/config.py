@@ -19,6 +19,7 @@ class Settings(BaseSettings):
     LOG_LEVEL: str = "INFO"
 
     # Database & Redis
+    POSTGRES_PASSWORD: str = "change_me_db_password"
     DATABASE_URL: str = "postgresql+asyncpg://postgres:postgres@localhost:5432/aggregator_db"
     DATABASE_URL_SYNC: str = "postgresql://postgres:postgres@localhost:5432/aggregator_db"
     REDIS_URL: str = "redis://localhost:6379/0"
@@ -28,6 +29,8 @@ class Settings(BaseSettings):
     JWT_ALGORITHM: str = "HS256"
     ACCESS_TOKEN_EXPIRE_MINUTES: int = 1440
     ENCRYPTION_MASTER_KEY: str = _DEFAULT_FERNET
+    # Comma-separated CORS origins (never use *)
+    CORS_ORIGINS: str = ""
     # Dashboard admin bootstrap credentials (synced into AdminUser on login)
     ADMIN_USERNAME: str = "admin"
     ADMIN_PASSWORD: Optional[str] = None
@@ -133,6 +136,8 @@ class Settings(BaseSettings):
     INVOICE_TIMEOUT_MINUTES: int = 30
     # Halfway reminder for unpaid invoices (minutes after creation)
     CHECKOUT_REMINDER_MINUTES: int = 15
+    # Sham Cash without receipt abandoned after this many minutes
+    SHAM_CASH_ABANDON_MINUTES: int = 60
     VENTEBOT_DEPOSIT_TIMEOUT_SECONDS: int = 300
     # Alert Admin Bot when supplier API balance falls below this USD threshold
     SUPPLIER_BALANCE_ALERT_USD: float = 15.0
@@ -155,6 +160,20 @@ class Settings(BaseSettings):
     @property
     def is_production(self) -> bool:
         return (self.ENVIRONMENT or "").strip().lower() == "production"
+
+    @property
+    def cors_origins_list(self) -> List[str]:
+        raw = (self.CORS_ORIGINS or "").strip()
+        if raw:
+            return [o.strip() for o in raw.split(",") if o.strip()]
+        if self.is_production:
+            return ["https://bigishere.tech", "https://www.bigishere.tech"]
+        return [
+            "http://localhost",
+            "http://localhost:3000",
+            "http://127.0.0.1",
+            "http://127.0.0.1:3000",
+        ]
 
     @property
     def crypto_rails_enabled(self) -> bool:

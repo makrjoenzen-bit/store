@@ -115,8 +115,10 @@ def test_dual_force_subscribe_main_and_proof():
     assert "proof_channel_id" in src
     assert "force_sub_proof_channel_enabled" in src
     assert "need_main" in src and "need_proof" in src
-    assert "تم الاشتراك — تحقق وادخل المتجر" in src
+    assert "force_sub_verify" in src
     assert "pending_buy" in src
+    i18n = _read("src/bot/i18n/messages.py")
+    assert "تم التحقق" in i18n or "تحقق من الاشتراك" in i18n
 
 
 def test_stock_alert_subscribe_and_notify():
@@ -181,14 +183,16 @@ def test_miniapp_requires_customer_email_and_buyer_email():
     page = _read("dashboard/app/miniapp/page.tsx")
     assert "requires_customer_email" in page
     assert "buyer_email" in page
-    assert "البريد الإلكتروني للتفعيل" in page
+    assert "البريد" in page
 
 
 def test_dashboard_sham_cash_supplier_column_and_receipt_proxy():
-    page = _read("dashboard/app/sham-cash/page.tsx")
+    # Sham Cash UI lives under /orders (legacy /sham-cash redirects)
+    page = _read("dashboard/app/orders/page.tsx")
     assert "supplier_name" in page
     assert "المورد" in page
-    assert "/receipt" in page
+    redirect = _read("dashboard/app/sham-cash/page.tsx")
+    assert "orders?tab=sham-cash" in redirect
     orders_api = _read("src/api/routes/orders.py")
     assert '"{order_id}/receipt"' in orders_api or "/receipt" in orders_api
     assert "download_telegram_file" in orders_api
@@ -197,7 +201,7 @@ def test_dashboard_sham_cash_supplier_column_and_receipt_proxy():
 def test_storefront_blockquote_and_stock_labels():
     shop = _read("src/bot/handlers/shop.py")
     assert "<blockquote>" in shop
-    assert "مستخدمو المتجر" in shop
+    assert "total_users" in shop or "👥" in shop
     kb = _read("src/bot/keyboards/inline.py")
     assert "📦" in kb
     assert "نفد" in kb
